@@ -199,6 +199,47 @@ def build_export(records, fmt):
     return "\n".join(lines)
 
 
+# ---------------- Fork: 分析分叉点之后的文件改动 ----------------
+_EDIT_TOOLS = {"edit", "multiedit", "write", "notebookedit", "strreplace",
+               "createfile", "searchreplace", "applypatch", "search_replace", "create_file"}
+_BASH_TOOLS = {"bash", "shell", "terminal", "runcommand", "run_terminal_cmd", "runterminalcmd"}
+_FILE_KEYS = ("file_path", "path", "notebook_path", "target_file", "filePath", "targetFile", "filepath")
+
+
+def analyze_file_changes(records, start):
+    """扫描 records[start:] 里的工具调用, 汇总被改动的文件。"""
+    edited = {}
+    bash = []
+    for r in records[start:]:
+        if not isinstance(r, dict):
+            continue
+        m = r.get("message") or {}
+        content = m.get("content")
+        if not isinstance(content, list):
+            continue
+        for p in content:
+            if not isinstance(p, dict) or p.get("type") != "tool_use":
+                continue
+            name = p.get("name") or ""
+            nl = name.lower()
+            inp = p.get("input") if isinstance(p.get("input"), dict) else {}
+            if nl in _EDIT_TOOLS:
+                fp = next((inp[k] for k in _FILE_KEYS if isinstance(inp.get(k), str)), None)
+                if fp:
+                    e = edited.setdefault(fp, {"tools": set(), "count": 0})
+                    e["tools"].add(name)
+                    e["count"] += 1
+            elif nl in _BASH_TOOLS:
+                cmd = inp.get("command") or inp.get("cmd") or ""
+                if cmd:
+                    bash.append(cmd)
+    return {
+        "edited": [{"file": f, "tools": sorted(v["tools"]), "count": v["count"]}
+                   for f, v in edited.items()],
+        "bash": bash,
+    }
+
+
 # ---------------- 操作与撤销/重做 ----------------
 def _do_op(op):
     """执行 op(直接修改 STATE['records']), 返回其逆操作。"""
@@ -372,6 +413,18 @@ class Handler(BaseHTTPRequestHandler):
                             if len(out) >= 300:
                                 break
             return self._send(200, {"ok": True, "results": out})
+
+        if u.path == "/api/fork-analysis":
+            try:
+                idx = int(q.get("idx", ["-1"])[0])
+            except ValueError:
+                return self._send(400, {"ok": False, "error": "idx 非法"})
+            with LOCK:
+                n = len(STATE["records"])
+                if idx < 0 or idx >= n:
+                    return self._send(400, {"ok": False, "error": "idx 越界"})
+                res = analyze_file_changes(STATE["records"], idx + 1)
+            return self._send(200, {"ok": True, **res})
 
         if u.path == "/api/export":
             fmt = q.get("fmt", ["txt"])[0]
@@ -898,8 +951,29 @@ async function moveMsg(from, to){
 function flash(idx){ const el=listEl.querySelector(`[data-idx="${idx}"]`); if(el){ el.scrollIntoView({block:"center"}); el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash"); } }
 
 async function forkFrom(idx){
-  if(!confirm(`从 #${idx} fork 出新会话?\n将复制「开头到此条」共 ${idx+1} 条为一个新 sessionId 的独立文件(写入同目录), 当前会话不受影响。`)) return;
   await flushUpdates();
+  let warn="";
+  try{
+    const a=await (await fetch(`/api/fork-analysis?idx=${idx}`)).json();
+    if(a.ok){
+      const ne=a.edited.length, nb=a.bash.length;
+      if(ne||nb){
+        warn="\n\n⚠ 分叉点之后有文件改动 —— Fork 只分叉对话, 不会还原文件:";
+        if(ne){
+          warn+=`\n\n· 编辑类改动(可用 git 还原) ${ne} 个文件:`;
+          warn+="\n   "+a.edited.slice(0,15).map(e=>`${e.file}  [${e.tools.join('/')}×${e.count}]`).join("\n   ");
+          if(ne>15) warn+=`\n   …另 ${ne-15} 个`;
+        }
+        if(nb){
+          warn+=`\n\n· ${nb} 条 Bash 命令(无法从记录还原, 可能改过文件/产物)`;
+          warn+="\n   "+a.bash.slice(0,5).map(c=>"$ "+c.split("\n")[0].slice(0,70)).join("\n   ");
+          if(nb>5) warn+=`\n   …另 ${nb-5} 条`;
+        }
+        warn+="\n\n若要真正回到该分叉点, 请自行把这些文件还原到当时状态(建议用 git)。";
+      }
+    }
+  }catch(e){}
+  if(!confirm(`从 #${idx} fork 出新会话?\n将复制「开头到此条」共 ${idx+1} 条为一个新 sessionId 的独立文件(写入同目录), 当前会话不受影响。${warn}`)) return;
   const j=await (await fetch("/api/fork",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({idx})})).json();
   if(!j.ok){ toast("fork 失败: "+j.error); return; }
   await loadSessions();
