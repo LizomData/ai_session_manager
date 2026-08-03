@@ -182,14 +182,21 @@ def write_codex_session(records, cwd="", title="", rand_bytes=None):
         item = _message_item(rec)
         if not item:
             continue
-        if item["role"] == "user":
-            txt = item["content"][0]["text"]
-            user_texts.append(txt)
-            # 同时写一条 user_message 事件(Codex 的输入历史/渲染更完整)
+        role = item["role"]
+        txt = item["content"][0]["text"]
+        # 复刻真实每轮结构: 用户 = response_item + user_message 事件;
+        # 助手 = agent_message 事件 + response_item(Codex 的对话transcript靠这些事件渲染)
+        if role == "user":
+            lines.append({"timestamp": ts, "type": "response_item", "payload": item})
             lines.append({"timestamp": ts, "type": "event_msg",
-                          "payload": {"type": "user_message", "message": txt,
-                                      "images": [], "local_images": [], "text_elements": []}})
-        lines.append({"timestamp": ts, "type": "response_item", "payload": item})
+                          "payload": {"type": "user_message", "message": txt, "images": []}})
+            user_texts.append(txt)
+        elif role == "assistant":
+            lines.append({"timestamp": ts, "type": "event_msg",
+                          "payload": {"type": "agent_message", "message": txt}})
+            lines.append({"timestamp": ts, "type": "response_item", "payload": item})
+        else:
+            lines.append({"timestamp": ts, "type": "response_item", "payload": item})
 
     lt = time.localtime(now)
     day_dir = os.path.join(sessions_root(), time.strftime("%Y", lt), time.strftime("%m", lt), time.strftime("%d", lt))
