@@ -1,0 +1,24 @@
+# 会话数据(个人隐私 / 体积大, 不纳入仓库)
+*.jsonl
+*.bak.*
+*.tmp
+
+# 会话目录(从 ~/.claude/projects 复制来的样本数据)
+e--dumpProjects-*/
+
+# 运行日志
+editor.log
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
