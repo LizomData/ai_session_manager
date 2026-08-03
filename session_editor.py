@@ -45,11 +45,26 @@ def projects_root():
     return os.path.join(os.path.expanduser("~"), ".claude", "projects")
 
 
+def cursor_root():
+    return os.path.join(os.path.expanduser("~"), ".cursor", "projects")
+
+
+def _source_of(ap):
+    cl = os.path.abspath(projects_root())
+    cu = os.path.abspath(cursor_root())
+    if ap.startswith(cl):
+        return "claude"
+    if ap.startswith(cu):
+        return "cursor"
+    return "other"
+
+
 def discover_sessions(extra_dir=None):
     roots = []
     if extra_dir:
         roots.append(extra_dir)
     roots.append(projects_root())
+    roots.append(cursor_root())
     seen, out = set(), []
     for root in roots:
         if not root or not os.path.isdir(root):
@@ -63,8 +78,8 @@ def discover_sessions(extra_dir=None):
                 st = os.stat(ap)
             except OSError:
                 continue
-            out.append({"path": ap, "name": os.path.basename(ap),
-                        "dir": os.path.dirname(ap), "size": st.st_size, "mtime": st.st_mtime})
+            out.append({"path": ap, "name": os.path.basename(ap), "dir": os.path.dirname(ap),
+                        "size": st.st_size, "mtime": st.st_mtime, "source": _source_of(ap)})
     out.sort(key=lambda x: x["mtime"], reverse=True)
     return out
 
@@ -99,15 +114,21 @@ def save_jsonl(path, records):
 
 # ---------------- 记录辅助 ----------------
 def record_role(rec):
-    if rec.get("type") == "summary":
+    t = rec.get("type")
+    if t == "summary":
         return "summary"
+    if t == "turn_ended":
+        return "turn_ended"
     m = rec.get("message") or {}
-    return m.get("role") or rec.get("type") or "?"
+    # Cursor: role 在顶层; Claude Code: 在 message.role 或 type
+    return rec.get("role") or m.get("role") or t or "?"
 
 
 def record_to_text(rec):
     if rec.get("type") == "summary":
         return rec.get("summary", "")
+    if rec.get("type") == "turn_ended":
+        return "[turn_ended: %s]" % rec.get("status", "")
     m = rec.get("message") or {}
     c = m.get("content")
     if isinstance(c, str):
@@ -576,6 +597,12 @@ INDEX_HTML = r"""<!doctype html>
 <body>
 <header>
   <h1>会话编辑器</h1>
+  <select id="source" title="按来源过滤">
+    <option value="all">全部来源</option>
+    <option value="claude">Claude</option>
+    <option value="cursor">Cursor</option>
+    <option value="other">其它</option>
+  </select>
   <select id="sessions" title="选择会话文件"></select>
   <button id="reload" title="刷新会话列表">↻</button>
   <input id="pathInput" placeholder="或粘贴 .jsonl 绝对路径" style="width:210px">
@@ -656,14 +683,23 @@ async function flushUpdates(){
   }
 }
 
-async function loadSessions(){
-  const j=await (await fetch("/api/list")).json();
-  const sel=$("#sessions"); sel.innerHTML='<option value="">— 选择会话 —</option>';
-  if(j.ok) for(const s of j.sessions){
+let ALL_SESSIONS=[];
+function renderSessionOptions(){
+  const src=$("#source").value;
+  const list=ALL_SESSIONS.filter(s=> src==="all"? true : s.source===src);
+  const sel=$("#sessions");
+  const tag={claude:"[Claude]",cursor:"[Cursor]",other:"[其它]"};
+  sel.innerHTML=`<option value="">— 选择会话 (${list.length}) —</option>`;
+  for(const s of list){
     const o=document.createElement("option"); o.value=s.path;
-    o.textContent=`${s.name.slice(0,10)}…  ·  ${fmtSize(s.size)}  ·  ${fmtTime(s.mtime)}  ·  ${s.dir.split(/[\\/]/).pop()}`;
+    o.textContent=`${tag[s.source]||""} ${s.name.slice(0,10)}…  ·  ${fmtSize(s.size)}  ·  ${fmtTime(s.mtime)}  ·  ${s.dir.split(/[\\/]/).pop()}`;
     sel.appendChild(o);
   }
+}
+async function loadSessions(){
+  const j=await (await fetch("/api/list")).json();
+  ALL_SESSIONS = j.ok? j.sessions : [];
+  renderSessionOptions();
 }
 
 async function openFile(path){
@@ -694,6 +730,7 @@ async function loadPage(page){
 function getBlocks(rec){
   const blocks=[];
   if(rec.type==="summary"){ blocks.push({kind:"summary",editable:true,get:()=>rec.summary||"",set:v=>rec.summary=v}); return blocks; }
+  if(rec.type==="turn_ended"){ blocks.push({kind:"turn_ended",editable:false,part:{status:rec.status}}); return blocks; }
   const m=rec.message; if(!m) return blocks;
   const c=m.content;
   if(typeof c==="string"){ blocks.push({kind:"text",editable:true,get:()=>m.content,set:v=>m.content=v}); return blocks; }
@@ -706,7 +743,11 @@ function getBlocks(rec){
   }
   return blocks;
 }
-function roleOf(rec){ if(rec.type==="summary") return "summary"; return (rec.message&&rec.message.role)||rec.type||"?"; }
+function roleOf(rec){
+  if(rec.type==="summary") return "summary";
+  if(rec.type==="turn_ended") return "turn_ended";
+  return rec.role||(rec.message&&rec.message.role)||rec.type||"?";   // Cursor 顶层 role / Claude message.role
+}
 
 function renderRecord(rec, idx){
   const role=roleOf(rec);
@@ -807,7 +848,9 @@ async function truncateAfter(idx){
   if(!confirm(`删除 #${idx} 之后的 ${n} 条消息?`)) return;
   const j=await structOp("/api/truncate",{idx}); if(j) await loadPage(Math.min(CUR_PAGE,pageCount()-1));
 }
+function isCursor(rec){ return rec && rec.role!==undefined && rec.uuid===undefined; }
 function skeleton(neighbor, role){
+  if(isCursor(neighbor)) return { role, message:{content:[{type:"text",text:""}]} };  // Cursor 风格: 顶层 role, 无链表字段
   const r={ uuid:uuid(), parentUuid:null, type:role, message:{role,content:[{type:"text",text:""}]}, timestamp:new Date().toISOString() };
   for(const k of ["sessionId","cwd","version","gitBranch","userType","entrypoint"]) if(neighbor&&neighbor[k]!==undefined) r[k]=neighbor[k];
   return r;
@@ -817,12 +860,14 @@ async function insertMsg(idx, where){
   const role = prompt("新消息角色 (user / assistant / system):","user"); if(!role) return;
   const nr=skeleton(rec, role.trim());
   const insertIdx = where==="below"? idx+1 : idx;
-  nr.parentUuid = where==="below"? (rec.uuid||null) : (rec.parentUuid||null);
-  const j=await structOp("/api/insert",{idx:insertIdx, record:nr, relink:true});
+  const claudeStyle = nr.uuid!==undefined;
+  if(claudeStyle) nr.parentUuid = where==="below"? (rec.uuid||null) : (rec.parentUuid||null);
+  const j=await structOp("/api/insert",{idx:insertIdx, record:nr, relink:claudeStyle});
   if(j){ await loadPage(Math.floor(insertIdx/PAGE_SIZE)); flash(insertIdx); }
 }
 async function duplicateMsg(idx, rec){
-  const copy=JSON.parse(JSON.stringify(rec)); copy.uuid=uuid(); copy.parentUuid=rec.uuid||null;
+  const copy=JSON.parse(JSON.stringify(rec));
+  if(copy.uuid!==undefined){ copy.uuid=uuid(); copy.parentUuid=rec.uuid||null; }   // 仅 Claude 风格才改 uuid
   const j=await structOp("/api/insert",{idx:idx+1, record:copy, relink:false});
   if(j){ await loadPage(Math.floor((idx+1)/PAGE_SIZE)); flash(idx+1); }
 }
@@ -912,6 +957,7 @@ async function openBak(){
 
 // ---- 事件 ----
 $("#sessions").onchange=e=>openFile(e.target.value);
+$("#source").onchange=renderSessionOptions;
 $("#reload").onclick=loadSessions;
 $("#openPath").onclick=()=>openFile($("#pathInput").value.trim());
 $("#pathInput").addEventListener("keydown",e=>{ if(e.key==="Enter") openFile(e.target.value.trim()); });
