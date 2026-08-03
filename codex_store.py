@@ -21,6 +21,7 @@ import copy
 import glob
 import json
 import os
+import sqlite3
 import time
 
 
@@ -106,11 +107,53 @@ def _message_item(rec):
     return {"type": "message", "role": crole, "content": [{"type": ctype, "text": text}]}
 
 
-def write_codex_session(records, cwd="", title="", rand_bytes=None):
-    """把归一化会话写成 Codex rollout 并登记到 index/history。
+def _register_thread(session_id, rollout_path, cwd, title, first_user_message, now_ms):
+    """往 state_5.sqlite 的 threads 表插一行(这是 `codex resume` 真正读取的索引)。
 
-    rand_bytes: 用于生成 uuid7 的随机源(>=20 字节); 不传则用 os.urandom。
-    返回 dict: {path, session_id, count}
+    以一条真实 user 线程为模板复制所有列, 只覆盖身份/时间/路径等; 失败返回 (False, 原因)。
+    """
+    db = os.path.join(codex_root(), "state_5.sqlite")
+    if not os.path.isfile(db):
+        return False, "无 state_5.sqlite(该 Codex 版本索引方式不同)"
+    try:
+        con = sqlite3.connect(db, timeout=5)
+    except sqlite3.Error as e:
+        return False, str(e)
+    try:
+        cols = [c[1] for c in con.execute("PRAGMA table_info(threads)")]
+        if not cols:
+            return False, "threads 表不存在"
+        row = con.execute(
+            "SELECT * FROM threads WHERE thread_source='user' ORDER BY updated_at_ms DESC LIMIT 1").fetchone()
+        tmpl = dict(zip(cols, row)) if row else {c: None for c in cols}
+        cwd_val = cwd
+        if cwd_val and not cwd_val.startswith("\\\\?\\"):
+            cwd_val = "\\\\?\\" + cwd_val
+        override = {
+            "id": session_id, "rollout_path": rollout_path, "cwd": cwd_val or "",
+            "title": title, "first_user_message": first_user_message, "preview": first_user_message,
+            "created_at": now_ms // 1000, "updated_at": now_ms // 1000,
+            "created_at_ms": now_ms, "updated_at_ms": now_ms,
+            "recency_at": now_ms // 1000, "recency_at_ms": now_ms,
+            "tokens_used": 0, "archived": 0, "thread_source": "user",
+            "git_sha": None, "git_branch": None, "git_origin_url": None,
+            "agent_path": None, "agent_nickname": None, "agent_role": None,
+        }
+        vals = [override.get(c, tmpl.get(c)) for c in cols]
+        con.execute("INSERT OR REPLACE INTO threads (%s) VALUES (%s)"
+                    % (",".join(cols), ",".join("?" * len(cols))), vals)
+        con.commit()
+        return True, None
+    except sqlite3.Error as e:
+        return False, str(e)
+    finally:
+        con.close()
+
+
+def write_codex_session(records, cwd="", title="", rand_bytes=None):
+    """把归一化会话写成 Codex rollout, 登记到 threads 索引, 并安全追加 history.jsonl。
+
+    返回 dict: {path, session_id, count, registered, register_error}
     """
     if rand_bytes is None:
         rand_bytes = os.urandom(20)
@@ -118,7 +161,6 @@ def write_codex_session(records, cwd="", title="", rand_bytes=None):
     now_ms = int(now * 1000)
     session_id = uuid7(now_ms, rand_bytes[0:10])
 
-    # session_meta: 以真实模板为基础覆盖关键字段
     meta = _load_template_meta() or {
         "originator": "codex_cli", "cli_version": "unknown", "source": "cli",
         "thread_source": "user", "model_provider": "openai",
@@ -140,31 +182,39 @@ def write_codex_session(records, cwd="", title="", rand_bytes=None):
         item = _message_item(rec)
         if not item:
             continue
-        lines.append({"timestamp": ts, "type": "response_item", "payload": item})
         if item["role"] == "user":
-            user_texts.append(item["content"][0]["text"])
+            txt = item["content"][0]["text"]
+            user_texts.append(txt)
+            # 同时写一条 user_message 事件(Codex 的输入历史/渲染更完整)
+            lines.append({"timestamp": ts, "type": "event_msg",
+                          "payload": {"type": "user_message", "message": txt,
+                                      "images": [], "local_images": [], "text_elements": []}})
+        lines.append({"timestamp": ts, "type": "response_item", "payload": item})
 
-    # rollout 文件路径(本地日期/时间)
     lt = time.localtime(now)
     day_dir = os.path.join(sessions_root(), time.strftime("%Y", lt), time.strftime("%m", lt), time.strftime("%d", lt))
     os.makedirs(day_dir, exist_ok=True)
     fname = "rollout-%s-%s.jsonl" % (time.strftime("%Y-%m-%dT%H-%M-%S", lt), session_id)
-    path = os.path.join(day_dir, fname)
+    path = os.path.abspath(os.path.join(day_dir, fname))
     with open(path, "w", encoding="utf-8", newline="\n") as f:
         for ln in lines:
             f.write(json.dumps(ln, ensure_ascii=False))
             f.write("\n")
 
-    # 登记 session_index.jsonl
-    thread_name = (title or (user_texts[0] if user_texts else "Imported session")).strip().splitlines()[0][:60]
-    with open(os.path.join(codex_root(), "session_index.jsonl"), "a", encoding="utf-8", newline="\n") as f:
-        f.write(json.dumps({"id": session_id, "thread_name": thread_name,
-                            "updated_at": _iso_micros_z(now)}, ensure_ascii=False) + "\n")
+    thread_name = (title or (user_texts[0] if user_texts else "Imported session")).strip().splitlines()[0][:80]
+    first_user = (user_texts[0] if user_texts else "").splitlines()[0][:200] if user_texts else ""
 
-    # 追加 history.jsonl(每条用户输入一行)
-    with open(os.path.join(codex_root(), "history.jsonl"), "a", encoding="utf-8", newline="\n") as f:
-        for txt in user_texts:
-            f.write(json.dumps({"session_id": session_id, "ts": int(now), "text": txt}, ensure_ascii=False) + "\n")
+    # 关键: 登记到 threads(codex resume 真正读取的索引)
+    registered, register_error = _register_thread(session_id, path, cwd, thread_name, first_user, now_ms)
 
-    return {"path": os.path.abspath(path), "session_id": session_id,
-            "count": sum(1 for x in lines if x["type"] == "response_item")}
+    # 安全追加 history.jsonl(append 模式, 绝不截断)
+    try:
+        with open(os.path.join(codex_root(), "history.jsonl"), "a", encoding="utf-8", newline="\n") as f:
+            for txt in user_texts:
+                f.write(json.dumps({"session_id": session_id, "ts": int(now), "text": txt}, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+    return {"path": path, "session_id": session_id,
+            "count": sum(1 for x in lines if x["type"] == "response_item"),
+            "registered": registered, "register_error": register_error}

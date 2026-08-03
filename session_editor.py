@@ -1121,9 +1121,14 @@ async function doExport(){
   const j=await (await fetch("/api/export-to",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
   if(!j.ok){ toast("导出失败: "+j.error); return; }
   $("#exportModal").classList.remove("on");
-  const hint = target==="claude"
-    ? `在该 cwd 下运行 “claude --resume” 应能看到(项目目录:\n${j.project_dir})`
-    : `在 Codex 里 “codex resume” 或历史列表应能看到`;
+  let hint;
+  if(target==="claude"){
+    hint=`在该 cwd 下运行 “claude --resume” 应能看到(项目目录:\n${j.project_dir})`;
+  }else{
+    hint = j.registered
+      ? `已登记到 Codex 会话索引(state_5.sqlite)。若 Codex 正开着, 请重启后在 “codex resume” 里查看。`
+      : `⚠ 未能登记到 Codex 索引: ${j.register_error||"未知"}\n(rollout 已写入, 但可能不显示。若因数据库被占用, 请关闭 Codex 后重试。)`;
+  }
   alert(`已导出到 ${target.toUpperCase()}:\n${j.path}\n\nsession_id: ${j.session_id}\n消息数: ${j.count}\ncwd: ${j.cwd||"(空)"}\n\n${hint}`);
 }
 async function saveLocal(){
