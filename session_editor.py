@@ -88,8 +88,18 @@ def discover_sessions(extra_dir=None):
                 st = os.stat(ap)
             except OSError:
                 continue
-            out.append({"path": ap, "name": os.path.basename(ap), "dir": os.path.dirname(ap),
-                        "size": st.st_size, "mtime": st.st_mtime, "source": _source_of(ap)})
+            src = _source_of(ap)
+            entry = {"path": ap, "name": os.path.basename(ap), "dir": os.path.dirname(ap),
+                     "size": st.st_size, "mtime": st.st_mtime, "source": src}
+            if src == "saved":
+                try:
+                    first = json.loads(open(ap, encoding="utf-8").readline())
+                    if isinstance(first, dict) and first.get("type") == "cc_meta":
+                        entry["from"] = first.get("origin")
+                        entry["from_cwd"] = first.get("cwd")
+                except (ValueError, OSError):
+                    pass
+            out.append(entry)
     # Cursor CLI 的 chat 会话(store.db, 可恢复的真实会话)
     try:
         for s in cursor_store.discover_chat_sessions():
@@ -617,11 +627,19 @@ class Handler(BaseHTTPRequestHandler):
                     if os.path.exists(out_path):
                         root, ext = os.path.splitext(name)
                         out_path = os.path.join(SAVED_DIR, "%s.%d%s" % (root, int(time.time()), ext))
-                    # 剥掉旧的来源元数据, 重新写一条(记录 origin / 源路径 / cwd / 保存时间)
+                    # 剥掉旧的来源元数据; 若之前保存过则沿用最初的来源, 否则按当前判定
+                    prior = next((r for r in STATE["records"]
+                                  if isinstance(r, dict) and r.get("type") == "cc_meta"), None)
                     recs = [r for r in STATE["records"]
                             if not (isinstance(r, dict) and r.get("type") == "cc_meta")]
-                    meta_line = {"type": "cc_meta", "origin": STATE.get("origin", "jsonl"),
-                                 "source_path": STATE.get("path"),
+                    if prior and prior.get("origin"):
+                        origin = prior["origin"]
+                    elif STATE.get("origin") == "cursor-store":
+                        origin = "cursor-store"
+                    else:
+                        origin = _source_of(STATE["path"]) if STATE.get("path") else "jsonl"
+                    meta_line = {"type": "cc_meta", "origin": origin,
+                                 "source_path": (prior or {}).get("source_path") or STATE.get("path"),
                                  "cwd": STATE.get("cwd") or _infer_cwd(recs),
                                  "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
                     save_jsonl(out_path, [meta_line] + recs)
@@ -788,6 +806,8 @@ let CUR_PATH="", TOTAL=0, CUR_PAGE=0, PAGE_SIZE=50, DIRTY=false;
 let PAGE_ITEMS=[];               // [{idx, rec}]
 const ACTIVE_FILTER = new Set();
 const PRE_LIMIT = 4000;
+const SRC_LABEL = {claude:"Claude", cursor:"Cursor(jsonl)", "cursor-store":"Cursor 会话(store.db)",
+                   "cursor-chat":"Cursor 会话(store.db)", saved:"本地保存", jsonl:"jsonl", other:"其它"};
 
 const $ = s => document.querySelector(s);
 const listEl=$("#list"), emptyEl=$("#empty");
@@ -831,7 +851,8 @@ function renderSessionOptions(){
   sel.innerHTML=`<option value="">— 选择会话 (${list.length}) —</option>`;
   for(const s of list){
     const o=document.createElement("option"); o.value=s.path;
-    o.textContent=`${tag[s.source]||""} ${s.name.slice(0,10)}…  ·  ${fmtSize(s.size)}  ·  ${fmtTime(s.mtime)}  ·  ${s.dir.split(/[\\/]/).pop()}`;
+    const from = s.source==="saved"&&s.from ? `  ·  源:${SRC_LABEL[s.from]||s.from}` : "";
+    o.textContent=`${tag[s.source]||""} ${s.name.slice(0,10)}…  ·  ${fmtSize(s.size)}  ·  ${fmtTime(s.mtime)}  ·  ${s.dir.split(/[\\/]/).pop()}${from}`;
     sel.appendChild(o);
   }
 }
@@ -916,7 +937,16 @@ function renderRecord(rec, idx){
   for(const b of blocks){
     const bd=document.createElement("div"); bd.className="block "+b.kind;
     const label=document.createElement("div"); label.className="btype";
-    label.textContent=b.kind+(b.name?(": "+b.name):"")+(b.editable?"":" (只读)"); bd.appendChild(label);
+    label.textContent = b.kind==="cc_meta" ? "来源信息" : (b.kind+(b.name?(": "+b.name):"")+(b.editable?"":" (只读)"));
+    bd.appendChild(label);
+    if(b.kind==="cc_meta"){
+      const p=b.part||{}; const esc=s=>(""+s).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+      const rows=[["来源", SRC_LABEL[p.origin]||p.origin||"?"],["工作目录 cwd", p.cwd||"(未知)"],
+                  ["源文件", p.source_path||"(未知)"],["保存时间", p.saved_at||""]];
+      const t=document.createElement("div");
+      t.innerHTML=rows.map(([k,v])=>`<div style="display:flex;gap:8px;margin:2px 0"><span style="color:var(--muted);min-width:92px">${k}</span><span style="word-break:break-all">${esc(v)}</span></div>`).join("");
+      bd.appendChild(t); body.appendChild(bd); continue;
+    }
     if(b.editable){
       const ta=document.createElement("textarea"); if(b.kind==="text"||b.kind==="summary") ta.className="text";
       ta.value=b.get();
