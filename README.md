@@ -36,6 +36,10 @@ python session_editor.py --port 8790 --no-browser --dir <额外扫描目录>
 | Fork 会话 | 从任意消息分叉出一个新 `sessionId` 的独立会话文件(写入同目录,可直接 `--resume`),原会话不动 |
 | 备份/回滚 | 每次保存自动生成 `.bak.<时间戳>`;可列出所有备份并一键回滚 |
 | 导出 | 导出为 Markdown 或纯文本 |
+| 多格式 | 同时支持 Claude Code jsonl、Cursor agent-transcript jsonl、Cursor CLI 会话 store.db;顶栏可按来源过滤 |
+| 格式转换 | Cursor ↔ Claude 互转,另存新文件(有损转换会弹窗说明) |
+| 读 Cursor store.db | 解析 `~/.cursor/chats/**/store.db`(内容寻址 blob + protobuf 节点 DAG),重建有序会话(比 jsonl 更全:含 system prompt / 工具调用 / 结果) |
+| 导出为 Cursor 会话 | **实验性**:把当前会话合成为可被 Cursor 读取的 `store.db + meta.json`(组目录 = `md5(cwd)`);能否实际 resume 需在 Cursor 里验证 |
 
 ## 安全
 
