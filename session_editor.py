@@ -344,7 +344,7 @@ def apply_user_op(op):
 def meta():
     return {"path": STATE["path"], "total": len(STATE["records"]), "dirty": STATE["dirty"],
             "errors": STATE["errors"], "canUndo": bool(UNDO), "canRedo": bool(REDO),
-            "origin": STATE.get("origin", "jsonl")}
+            "origin": STATE.get("origin", "jsonl"), "cwd": STATE.get("cwd", "")}
 
 
 # ---------------- HTTP ----------------
@@ -745,6 +745,9 @@ INDEX_HTML = r"""<!doctype html>
   .modal h2{margin:0 0 10px;font-size:15px}
   .bak{display:flex;gap:10px;align-items:center;padding:8px 4px;border-bottom:1px solid var(--border);font-size:13px}
   .bak .bn{flex:1;word-break:break-all}
+  .erow{display:flex;gap:10px;align-items:center;margin:9px 0}
+  .elabel{min-width:92px;color:var(--muted);font-size:13px}
+  .eopt{display:inline-flex;gap:5px;align-items:center;cursor:pointer;margin-right:14px}
 </style>
 </head>
 <body>
@@ -800,10 +803,25 @@ INDEX_HTML = r"""<!doctype html>
   <div id="bakList"><div class="hint">加载中…</div></div>
   <div style="text-align:right;margin-top:12px"><button id="bakClose">关闭</button></div>
 </div></div>
+<div class="modal" id="exportModal"><div class="card">
+  <h2>导出到其它 CLI</h2>
+  <div class="erow"><span class="elabel">目标</span>
+    <label class="eopt"><input type="radio" name="etarget" value="claude" checked> Claude Code</label>
+    <label class="eopt"><input type="radio" name="etarget" value="codex"> Codex</label>
+  </div>
+  <div class="erow"><span class="elabel">工作目录 cwd</span><input id="ecwd" placeholder="决定归属工作区" style="flex:1"></div>
+  <div class="erow"><span class="elabel">标题</span><input id="etitle" placeholder="留空取首条用户消息" style="flex:1"></div>
+  <div class="hint" id="ehint" style="margin-top:6px"></div>
+  <div style="text-align:right;margin-top:14px">
+    <button id="exportCancel">取消</button>
+    <button id="exportGo" class="primary">导出</button>
+  </div>
+</div></div>
 
 <script>
 let CUR_PATH="", TOTAL=0, CUR_PAGE=0, PAGE_SIZE=50, DIRTY=false;
 let PAGE_ITEMS=[];               // [{idx, rec}]
+let CUR_CWD="";
 const ACTIVE_FILTER = new Set();
 const PRE_LIMIT = 4000;
 const SRC_LABEL = {claude:"Claude", cursor:"Cursor(jsonl)", "cursor-store":"Cursor 会话(store.db)",
@@ -821,6 +839,7 @@ function uuid(){ return crypto.randomUUID? crypto.randomUUID()
   : "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{const r=Math.random()*16|0;return (c==="x"?r:(r&0x3|0x8)).toString(16);}); }
 
 function applyMeta(j){
+  if("cwd" in j) CUR_CWD=j.cwd;
   if("total" in j) TOTAL=j.total;
   if("dirty" in j){ DIRTY=j.dirty; $("#saveBtn").disabled=!DIRTY; }
   if("canUndo" in j) $("#undoBtn").disabled=!j.canUndo;
@@ -1079,19 +1098,31 @@ async function forkFrom(idx){
   if(confirm(`已生成新会话:\n${j.path}\n\n${j.count} 条 · sessionId ${j.sessionId.slice(0,8)}…\n\n是否立即打开该 fork?`)) await openFile(j.path);
   else toast("已生成: "+j.path.split(/[\\/]/).pop());
 }
-async function exportTo(){
+function exportTarget(){ const el=document.querySelector('input[name=etarget]:checked'); return el?el.value:"claude"; }
+function updateEhint(){
+  $("#ehint").textContent = exportTarget()==="claude"
+    ? "→ ~/.claude/projects/<cwd编码>/<sessionId>.jsonl;在该 cwd 下 “claude --resume” 可见(cwd 必填)。"
+    : "→ ~/.codex/sessions/… 并登记历史;“codex resume” 可见。cwd 留空则不归属特定工作区。";
+}
+function openExport(){
   if(!CUR_PATH){ toast("请先打开会话"); return; }
+  $("#ecwd").value = CUR_CWD||"";
+  $("#etitle").value = "";
+  updateEhint();
+  $("#exportModal").classList.add("on");
+}
+async function doExport(){
+  const target=exportTarget();
+  const cwd=$("#ecwd").value.trim();
+  const title=$("#etitle").value.trim();
+  if(target==="claude" && !cwd){ toast("Claude 需要填 cwd 才能 resume"); return; }
   await flushUpdates();
-  let target=(prompt("导出目标 CLI:  claude  或  codex","claude")||"").trim().toLowerCase();
-  if(!target) return;
-  if(target!=="claude"&&target!=="codex"){ toast("只支持 claude / codex"); return; }
-  const cwd=prompt(`目标 cwd(${target==="claude"?"决定 Claude 项目目录, 必填才能 resume":"Codex 归属工作目录"}; 留空则自动推断):`,"");
-  const title=prompt("会话标题(显示在历史里; 留空则取首条用户消息):","");
   const body={target}; if(cwd) body.cwd=cwd; if(title) body.title=title;
   const j=await (await fetch("/api/export-to",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
   if(!j.ok){ toast("导出失败: "+j.error); return; }
+  $("#exportModal").classList.remove("on");
   const hint = target==="claude"
-    ? `在该 cwd 下运行 “claude --resume” 应能看到(会话在项目目录:\n${j.project_dir})`
+    ? `在该 cwd 下运行 “claude --resume” 应能看到(项目目录:\n${j.project_dir})`
     : `在 Codex 里 “codex resume” 或历史列表应能看到`;
   alert(`已导出到 ${target.toUpperCase()}:\n${j.path}\n\nsession_id: ${j.session_id}\n消息数: ${j.count}\ncwd: ${j.cwd||"(空)"}\n\n${hint}`);
 }
@@ -1182,7 +1213,11 @@ $("#openPath").onclick=()=>openFile($("#pathInput").value.trim());
 $("#pathInput").addEventListener("keydown",e=>{ if(e.key==="Enter") openFile(e.target.value.trim()); });
 $("#saveBtn").onclick=save;
 $("#saveLocalBtn").onclick=saveLocal;
-$("#exportToBtn").onclick=exportTo;
+$("#exportToBtn").onclick=openExport;
+$("#exportGo").onclick=doExport;
+$("#exportCancel").onclick=()=>$("#exportModal").classList.remove("on");
+$("#exportModal").onclick=e=>{ if(e.target.id==="exportModal") $("#exportModal").classList.remove("on"); };
+document.querySelectorAll('input[name=etarget]').forEach(r=> r.onchange=updateEhint);
 $("#undoBtn").onclick=undo; $("#redoBtn").onclick=redo;
 $("#exportMd").onclick=()=>exportAs("md"); $("#exportTxt").onclick=()=>exportAs("txt");
 $("#searchBtn").onclick=doSearch;
