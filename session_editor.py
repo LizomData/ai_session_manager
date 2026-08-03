@@ -40,7 +40,7 @@ import codex_store
 import claude_store
 
 # ---------------- 后端会话状态(单文件, 本地单用户) ----------------
-STATE = {"path": None, "records": [], "dirty": False, "errors": [], "origin": "jsonl"}
+STATE = {"path": None, "records": [], "dirty": False, "errors": [], "origin": "jsonl", "cwd": ""}
 
 # 工具执行目录 / 本地会话保存目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -378,11 +378,13 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if os.path.basename(path).lower() == "store.db":
                     records, errors, origin = cursor_store.read_store(path), [], "cursor-store"
+                    cwd = cursor_store.read_session_meta(os.path.dirname(path)).get("cwd", "")
                 else:
                     records, errors, origin = (*load_jsonl(path), "jsonl")
+                    cwd = _infer_cwd(records)
                 with LOCK:
                     STATE.update(path=os.path.abspath(path), records=records, dirty=False,
-                                 errors=errors, origin=origin)
+                                 errors=errors, origin=origin, cwd=cwd)
                     UNDO.clear()
                     REDO.clear()
                     return self._send(200, {"ok": True, **meta()})
@@ -615,11 +617,18 @@ class Handler(BaseHTTPRequestHandler):
                     if os.path.exists(out_path):
                         root, ext = os.path.splitext(name)
                         out_path = os.path.join(SAVED_DIR, "%s.%d%s" % (root, int(time.time()), ext))
-                    save_jsonl(out_path, STATE["records"])
+                    # 剥掉旧的来源元数据, 重新写一条(记录 origin / 源路径 / cwd / 保存时间)
+                    recs = [r for r in STATE["records"]
+                            if not (isinstance(r, dict) and r.get("type") == "cc_meta")]
+                    meta_line = {"type": "cc_meta", "origin": STATE.get("origin", "jsonl"),
+                                 "source_path": STATE.get("path"),
+                                 "cwd": STATE.get("cwd") or _infer_cwd(recs),
+                                 "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+                    save_jsonl(out_path, [meta_line] + recs)
                 except Exception as e:
                     return self._send(500, {"ok": False, "error": str(e)})
                 return self._send(200, {"ok": True, "path": os.path.abspath(out_path),
-                                        "count": len(STATE["records"])})
+                                        "count": len(recs)})
 
             if u.path == "/api/save":
                 path = STATE["path"]
@@ -861,6 +870,7 @@ function getBlocks(rec){
   const blocks=[];
   if(rec.type==="summary"){ blocks.push({kind:"summary",editable:true,get:()=>rec.summary||"",set:v=>rec.summary=v}); return blocks; }
   if(rec.type==="turn_ended"){ blocks.push({kind:"turn_ended",editable:false,part:{status:rec.status}}); return blocks; }
+  if(rec.type==="cc_meta"){ blocks.push({kind:"cc_meta",editable:false,part:{origin:rec.origin,cwd:rec.cwd,source_path:rec.source_path,saved_at:rec.saved_at}}); return blocks; }
   const m=rec.message; if(!m) return blocks;
   const c=m.content;
   if(typeof c==="string"){ blocks.push({kind:"text",editable:true,get:()=>m.content,set:v=>m.content=v}); return blocks; }
@@ -876,6 +886,7 @@ function getBlocks(rec){
 function roleOf(rec){
   if(rec.type==="summary") return "summary";
   if(rec.type==="turn_ended") return "turn_ended";
+  if(rec.type==="cc_meta") return "来源信息";
   return rec.role||(rec.message&&rec.message.role)||rec.type||"?";   // Cursor 顶层 role / Claude message.role
 }
 
