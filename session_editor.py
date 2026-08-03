@@ -26,7 +26,6 @@ import copy
 import glob
 import json
 import os
-import re
 import shutil
 import threading
 import time
@@ -198,113 +197,6 @@ def build_export(records, fmt):
             lines.append(txt or "(空)")
             lines.append("")
     return "\n".join(lines)
-
-
-# ---------------- 格式转换(Cursor ↔ Claude Code) ----------------
-def detect_format(records):
-    for r in records:
-        if isinstance(r, dict) and ("uuid" in r or r.get("type") == "summary"):
-            return "claude"
-    for r in records:
-        if isinstance(r, dict) and (r.get("type") == "turn_ended" or ("role" in r and "uuid" not in r)):
-            return "cursor"
-    return "claude"
-
-
-def _now_iso():
-    return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
-
-
-def _extract_ts(content):
-    """尽力从 Cursor user 文本里的 <timestamp> 解析 ISO 时间, 失败返回 None。"""
-    if not isinstance(content, list):
-        return None
-    for p in content:
-        if isinstance(p, dict) and p.get("type") == "text":
-            m = re.search(r"<timestamp>(.*?)</timestamp>", p.get("text", ""))
-            if m:
-                base = re.sub(r"\s*\(UTC[^)]*\)", "", m.group(1)).strip()
-                for fmt in ("%A, %b %d, %Y, %I:%M %p", "%a, %b %d, %Y, %I:%M %p"):
-                    try:
-                        return time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.strptime(base, fmt))
-                    except ValueError:
-                        continue
-    return None
-
-
-def _content_to_claude(content):
-    if not isinstance(content, list):
-        return content
-    out = []
-    for p in content:
-        p = dict(p) if isinstance(p, dict) else p
-        if isinstance(p, dict) and p.get("type") == "tool_use" and "id" not in p:
-            p["id"] = "toolu_" + uuidlib.uuid4().hex[:24]
-        out.append(p)
-    return out
-
-
-def _content_to_cursor(content):
-    if not isinstance(content, list):
-        return content
-    out = []
-    for p in content:
-        p = dict(p) if isinstance(p, dict) else p
-        if isinstance(p, dict) and p.get("type") == "tool_use":
-            p.pop("id", None)
-        out.append(p)
-    return out
-
-
-def cursor_to_claude(records, sid, notes):
-    out = []
-    parent = None
-    dropped = 0
-    for r in records:
-        if not isinstance(r, dict):
-            continue
-        if r.get("type") == "turn_ended":
-            dropped += 1
-            continue
-        m = r.get("message") or {}
-        role = r.get("role") or m.get("role") or r.get("type")
-        content = m.get("content")
-        if role is None and content is None:
-            continue
-        u = str(uuidlib.uuid4())
-        ts = _extract_ts(content) or _now_iso()
-        out.append({
-            "parentUuid": parent, "isSidechain": False, "userType": "external",
-            "type": role, "message": {"role": role, "content": _content_to_claude(content)},
-            "uuid": u, "timestamp": ts, "sessionId": sid,
-        })
-        parent = u
-    if dropped:
-        notes.append("丢弃了 %d 条 turn_ended 元数据行(Claude 格式无此概念)" % dropped)
-    notes.append("为每条生成了新的 uuid/parentUuid 链与 sessionId;tool_use 补了 id")
-    notes.append("时间戳尽力从 <timestamp> 解析, 解析不到的用当前 UTC 时间填充")
-    return out
-
-
-def claude_to_cursor(records, notes):
-    out = []
-    dropped = 0
-    for r in records:
-        if not isinstance(r, dict):
-            continue
-        if r.get("type") == "summary":
-            dropped += 1
-            continue
-        m = r.get("message") or {}
-        role = m.get("role") or r.get("role") or r.get("type")
-        if role not in ("user", "assistant", "system"):
-            continue
-        out.append({"role": role, "message": {"content": _content_to_cursor(m.get("content"))}})
-    out.append({"type": "turn_ended", "status": "success"})
-    if dropped:
-        notes.append("丢弃了 %d 条 summary 行" % dropped)
-    notes.append("去除了 uuid/parentUuid/timestamp/sessionId 等 Claude 专有字段;末尾补了 turn_ended")
-    return out
 
 
 # ---------------- 操作与撤销/重做 ----------------
@@ -621,42 +513,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(500, {"ok": False, "error": str(e)})
                 return self._send(200, {"ok": True, "path": out_path, "sessionId": new_sid, "count": len(prefix)})
 
-            if u.path == "/api/convert":
-                path = STATE["path"]
-                if not path:
-                    return self._send(400, {"ok": False, "error": "未打开文件"})
-                src = detect_format(STATE["records"])
-                target = data.get("target") or ("cursor" if src == "claude" else "claude")
-                if target not in ("cursor", "claude"):
-                    return self._send(400, {"ok": False, "error": "target 非法"})
-                notes = []
-                if target == "claude":
-                    conv = cursor_to_claude(STATE["records"], str(uuidlib.uuid4()), notes)
-                else:
-                    conv = claude_to_cursor(STATE["records"], notes)
-                root, _ = os.path.splitext(path)
-                out_path = os.path.abspath(root + (".to-claude.jsonl" if target == "claude" else ".to-cursor.jsonl"))
-                if os.path.exists(out_path):
-                    out_path = os.path.abspath(root + ".to-%s.%d.jsonl" % (target, int(time.time())))
-                try:
-                    tmp = out_path + ".tmp"
-                    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-                        for r in conv:
-                            f.write(json.dumps(r, ensure_ascii=False, separators=(",", ":")))
-                            f.write("\n")
-                    os.replace(tmp, out_path)
-                except Exception as e:
-                    return self._send(500, {"ok": False, "error": str(e)})
-                return self._send(200, {"ok": True, "path": out_path, "count": len(conv),
-                                        "from": src, "to": target, "notes": notes})
-
             if u.path == "/api/save":
                 path = STATE["path"]
                 if not path:
                     return self._send(400, {"ok": False, "error": "未打开文件"})
                 if STATE.get("origin") == "cursor-store":
                     return self._send(400, {"ok": False,
-                        "error": "Cursor store.db 为只读(内容受完整性校验保护, 不可改写); 请用「转换」导出为 jsonl 后再编辑"})
+                        "error": "Cursor store.db 为只读(内容受完整性校验保护, 不可改写)"})
                 try:
                     bak = save_jsonl(path, STATE["records"])
                     STATE["dirty"] = False
@@ -766,7 +629,6 @@ INDEX_HTML = r"""<!doctype html>
   <div class="spacer"></div>
   <button id="undoBtn" title="撤销 Ctrl+Z" disabled>↶ 撤销</button>
   <button id="redoBtn" title="重做 Ctrl+Y" disabled>↷ 重做</button>
-  <button id="convertBtn" title="Cursor ↔ Claude 格式互转(另存新文件)">转换</button>
   <button id="bakBtn" title="备份管理/回滚">备份</button>
   <button id="saveBtn" class="primary" disabled>保存</button>
   <button id="exportMd">导出MD</button>
@@ -1044,16 +906,6 @@ async function forkFrom(idx){
   if(confirm(`已生成新会话:\n${j.path}\n\n${j.count} 条 · sessionId ${j.sessionId.slice(0,8)}…\n\n是否立即打开该 fork?`)) await openFile(j.path);
   else toast("已生成: "+j.path.split(/[\\/]/).pop());
 }
-async function convertSession(){
-  if(!CUR_PATH){ toast("请先打开文件"); return; }
-  await flushUpdates();
-  const j=await (await fetch("/api/convert",{method:"POST",headers:{"Content-Type":"application/json"},body:"{}"})).json();
-  if(!j.ok){ toast("转换失败: "+j.error); return; }
-  await loadSessions();
-  const notes=(j.notes&&j.notes.length)? "\n\n转换说明:\n· "+j.notes.join("\n· ") : "";
-  if(confirm(`已从 [${j.from}] 转换为 [${j.to}] 格式:\n${j.path}\n\n${j.count} 条${notes}\n\n是否立即打开转换结果?`)) await openFile(j.path);
-  else toast("已生成: "+j.path.split(/[\\/]/).pop());
-}
 async function undo(){ const j=await structOp("/api/undo",{}); if(j&&!j.noop) await loadPage(Math.min(CUR_PAGE,pageCount()-1)); }
 async function redo(){ const j=await structOp("/api/redo",{}); if(j&&!j.noop) await loadPage(Math.min(CUR_PAGE,pageCount()-1)); }
 
@@ -1133,7 +985,6 @@ $("#undoBtn").onclick=undo; $("#redoBtn").onclick=redo;
 $("#exportMd").onclick=()=>exportAs("md"); $("#exportTxt").onclick=()=>exportAs("txt");
 $("#searchBtn").onclick=doSearch;
 $("#searchInput").addEventListener("keydown",e=>{ if(e.key==="Enter") doSearch(); if(e.key==="Escape") $("#results").classList.remove("on"); });
-$("#convertBtn").onclick=convertSession;
 $("#bakBtn").onclick=openBak; $("#bakClose").onclick=()=>$("#bakModal").classList.remove("on");
 $("#bakModal").onclick=e=>{ if(e.target.id==="bakModal") $("#bakModal").classList.remove("on"); };
 document.addEventListener("click",e=>{ if(!e.target.closest(".searchbox")) $("#results").classList.remove("on"); });
