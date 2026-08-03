@@ -201,13 +201,6 @@ def build_export(records, fmt):
 
 
 # ---------------- 格式转换(Cursor ↔ Claude Code) ----------------
-def _infer_cwd(records):
-    for r in records:
-        if isinstance(r, dict) and r.get("cwd"):
-            return r["cwd"]
-    return ""
-
-
 def detect_format(records):
     for r in records:
         if isinstance(r, dict) and ("uuid" in r or r.get("type") == "summary"):
@@ -657,24 +650,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {"ok": True, "path": out_path, "count": len(conv),
                                         "from": src, "to": target, "notes": notes})
 
-            if u.path == "/api/export-cursor-store":
-                if not STATE["records"]:
-                    return self._send(400, {"ok": False, "error": "未打开会话"})
-                cwd = data.get("cwd") or _infer_cwd(STATE["records"])
-                title = data.get("title") or "Imported: " + os.path.basename(STATE["path"] or "session")
-                try:
-                    res = cursor_store.write_store(STATE["records"], cwd=cwd, title=title)
-                except Exception as e:
-                    return self._send(500, {"ok": False, "error": str(e)})
-                return self._send(200, {"ok": True, "cwd": cwd, **res})
-
             if u.path == "/api/save":
                 path = STATE["path"]
                 if not path:
                     return self._send(400, {"ok": False, "error": "未打开文件"})
                 if STATE.get("origin") == "cursor-store":
                     return self._send(400, {"ok": False,
-                        "error": "store.db 为只读打开; 请用「→Cursor会话」另存, 或用「转换」导出为 jsonl"})
+                        "error": "Cursor store.db 为只读(内容受完整性校验保护, 不可改写); 请用「转换」导出为 jsonl 后再编辑"})
                 try:
                     bak = save_jsonl(path, STATE["records"])
                     STATE["dirty"] = False
@@ -785,7 +767,6 @@ INDEX_HTML = r"""<!doctype html>
   <button id="undoBtn" title="撤销 Ctrl+Z" disabled>↶ 撤销</button>
   <button id="redoBtn" title="重做 Ctrl+Y" disabled>↷ 重做</button>
   <button id="convertBtn" title="Cursor ↔ Claude 格式互转(另存新文件)">转换</button>
-  <button id="cursorStoreBtn" title="导出为 Cursor 可恢复会话 store.db(实验性)">→Cursor会话</button>
   <button id="bakBtn" title="备份管理/回滚">备份</button>
   <button id="saveBtn" class="primary" disabled>保存</button>
   <button id="exportMd">导出MD</button>
@@ -1073,16 +1054,6 @@ async function convertSession(){
   if(confirm(`已从 [${j.from}] 转换为 [${j.to}] 格式:\n${j.path}\n\n${j.count} 条${notes}\n\n是否立即打开转换结果?`)) await openFile(j.path);
   else toast("已生成: "+j.path.split(/[\\/]/).pop());
 }
-async function exportCursorStore(){
-  if(!CUR_PATH){ toast("请先打开会话"); return; }
-  await flushUpdates();
-  const cwd=prompt("目标工作区 cwd(决定在 Cursor 里归入哪个工作区; 留空则自动从会话推断):","");
-  const body={}; if(cwd) body.cwd=cwd;
-  const j=await (await fetch("/api/export-cursor-store",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
-  if(!j.ok){ toast("导出失败: "+j.error); return; }
-  await loadSessions();
-  alert(`已生成 Cursor 会话(实验性):\n${j.session_dir}\n\n工作区 cwd: ${j.cwd||"(空, 分组随机)"}\n消息数: ${j.count}\n组: ${j.group}\n\n· 结构复刻自真实会话, 能否被 Cursor 实际 resume 需在 Cursor 里验证\n· 重启 Cursor 后到对应工作区查看会话历史\n· 不想要可直接删除该文件夹`);
-}
 async function undo(){ const j=await structOp("/api/undo",{}); if(j&&!j.noop) await loadPage(Math.min(CUR_PAGE,pageCount()-1)); }
 async function redo(){ const j=await structOp("/api/redo",{}); if(j&&!j.noop) await loadPage(Math.min(CUR_PAGE,pageCount()-1)); }
 
@@ -1163,7 +1134,6 @@ $("#exportMd").onclick=()=>exportAs("md"); $("#exportTxt").onclick=()=>exportAs(
 $("#searchBtn").onclick=doSearch;
 $("#searchInput").addEventListener("keydown",e=>{ if(e.key==="Enter") doSearch(); if(e.key==="Escape") $("#results").classList.remove("on"); });
 $("#convertBtn").onclick=convertSession;
-$("#cursorStoreBtn").onclick=exportCursorStore;
 $("#bakBtn").onclick=openBak; $("#bakClose").onclick=()=>$("#bakModal").classList.remove("on");
 $("#bakModal").onclick=e=>{ if(e.target.id==="bakModal") $("#bakModal").classList.remove("on"); };
 document.addEventListener("click",e=>{ if(!e.target.closest(".searchbox")) $("#results").classList.remove("on"); });
