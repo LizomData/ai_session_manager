@@ -6,6 +6,9 @@
 # 会话目录(从 ~/.claude/projects 复制来的样本数据)
 e--dumpProjects-*/
 
+# 本地另存的会话
+saved_sessions/
+
 # 运行日志
 editor.log
 *.log

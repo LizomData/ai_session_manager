@@ -26,6 +26,7 @@ import copy
 import glob
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -38,6 +39,10 @@ import cursor_store
 
 # ---------------- 后端会话状态(单文件, 本地单用户) ----------------
 STATE = {"path": None, "records": [], "dirty": False, "errors": [], "origin": "jsonl"}
+
+# 工具执行目录 / 本地会话保存目录
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SAVED_DIR = os.path.join(BASE_DIR, "saved_sessions")
 UNDO, REDO = [], []
 UNDO_LIMIT = 300
 LOCK = threading.Lock()
@@ -52,11 +57,11 @@ def cursor_root():
 
 
 def _source_of(ap):
-    cl = os.path.abspath(projects_root())
-    cu = os.path.abspath(cursor_root())
-    if ap.startswith(cl):
+    if ap.startswith(os.path.abspath(SAVED_DIR)):
+        return "saved"
+    if ap.startswith(os.path.abspath(projects_root())):
         return "claude"
-    if ap.startswith(cu):
+    if ap.startswith(os.path.abspath(cursor_root())):
         return "cursor"
     return "other"
 
@@ -65,6 +70,7 @@ def discover_sessions(extra_dir=None):
     roots = []
     if extra_dir:
         roots.append(extra_dir)
+    roots.append(SAVED_DIR)
     roots.append(projects_root())
     roots.append(cursor_root())
     seen, out = set(), []
@@ -566,6 +572,29 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(500, {"ok": False, "error": str(e)})
                 return self._send(200, {"ok": True, "path": out_path, "sessionId": new_sid, "count": len(prefix)})
 
+            if u.path == "/api/save-local":
+                if not STATE["records"]:
+                    return self._send(400, {"ok": False, "error": "未打开会话"})
+                src = STATE["path"] or "session"
+                base = os.path.basename(src)
+                if base.lower() == "store.db":
+                    base = os.path.basename(os.path.dirname(src)) + ".jsonl"
+                name = data.get("name") or base
+                name = re.sub(r"[^\w.\-]", "_", name)
+                if not name.endswith(".jsonl"):
+                    name += ".jsonl"
+                try:
+                    os.makedirs(SAVED_DIR, exist_ok=True)
+                    out_path = os.path.join(SAVED_DIR, name)
+                    if os.path.exists(out_path):
+                        root, ext = os.path.splitext(name)
+                        out_path = os.path.join(SAVED_DIR, "%s.%d%s" % (root, int(time.time()), ext))
+                    save_jsonl(out_path, STATE["records"])
+                except Exception as e:
+                    return self._send(500, {"ok": False, "error": str(e)})
+                return self._send(200, {"ok": True, "path": os.path.abspath(out_path),
+                                        "count": len(STATE["records"])})
+
             if u.path == "/api/save":
                 path = STATE["path"]
                 if not path:
@@ -673,6 +702,7 @@ INDEX_HTML = r"""<!doctype html>
     <option value="claude">Claude</option>
     <option value="cursor">Cursor(jsonl)</option>
     <option value="cursor-chat">Cursor 会话(store.db)</option>
+    <option value="saved">本地保存</option>
     <option value="other">其它</option>
   </select>
   <select id="sessions" title="选择会话文件"></select>
@@ -683,6 +713,7 @@ INDEX_HTML = r"""<!doctype html>
   <button id="undoBtn" title="撤销 Ctrl+Z" disabled>↶ 撤销</button>
   <button id="redoBtn" title="重做 Ctrl+Y" disabled>↷ 重做</button>
   <button id="bakBtn" title="备份管理/回滚">备份</button>
+  <button id="saveLocalBtn" title="把当前会话(含改动)另存到工具目录的 saved_sessions/">存到本地</button>
   <button id="saveBtn" class="primary" disabled>保存</button>
   <button id="exportMd">导出MD</button>
   <button id="exportTxt">导出TXT</button>
@@ -760,7 +791,7 @@ function renderSessionOptions(){
   const src=$("#source").value;
   const list=ALL_SESSIONS.filter(s=> src==="all"? true : s.source===src);
   const sel=$("#sessions");
-  const tag={claude:"[Claude]",cursor:"[Cursor]","cursor-chat":"[Cursor·db]",other:"[其它]"};
+  const tag={claude:"[Claude]",cursor:"[Cursor]","cursor-chat":"[Cursor·db]",saved:"[本地]",other:"[其它]"};
   sel.innerHTML=`<option value="">— 选择会话 (${list.length}) —</option>`;
   for(const s of list){
     const o=document.createElement("option"); o.value=s.path;
@@ -980,6 +1011,17 @@ async function forkFrom(idx){
   if(confirm(`已生成新会话:\n${j.path}\n\n${j.count} 条 · sessionId ${j.sessionId.slice(0,8)}…\n\n是否立即打开该 fork?`)) await openFile(j.path);
   else toast("已生成: "+j.path.split(/[\\/]/).pop());
 }
+async function saveLocal(){
+  if(!CUR_PATH){ toast("请先打开会话"); return; }
+  await flushUpdates();
+  const dft=(CUR_PATH.split(/[\\/]/).pop()||"session").replace(/\.jsonl$/,"");
+  const name=prompt("另存文件名(保存到工具目录 saved_sessions/):", dft);
+  if(name===null) return;
+  const j=await (await fetch("/api/save-local",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name})})).json();
+  if(!j.ok){ toast("保存失败: "+j.error); return; }
+  await loadSessions();
+  toast("已存到本地: "+j.path.split(/[\\/]/).pop()+" ("+j.count+" 条)");
+}
 async function undo(){ const j=await structOp("/api/undo",{}); if(j&&!j.noop) await loadPage(Math.min(CUR_PAGE,pageCount()-1)); }
 async function redo(){ const j=await structOp("/api/redo",{}); if(j&&!j.noop) await loadPage(Math.min(CUR_PAGE,pageCount()-1)); }
 
@@ -1055,6 +1097,7 @@ $("#reload").onclick=loadSessions;
 $("#openPath").onclick=()=>openFile($("#pathInput").value.trim());
 $("#pathInput").addEventListener("keydown",e=>{ if(e.key==="Enter") openFile(e.target.value.trim()); });
 $("#saveBtn").onclick=save;
+$("#saveLocalBtn").onclick=saveLocal;
 $("#undoBtn").onclick=undo; $("#redoBtn").onclick=redo;
 $("#exportMd").onclick=()=>exportAs("md"); $("#exportTxt").onclick=()=>exportAs("txt");
 $("#searchBtn").onclick=doSearch;
