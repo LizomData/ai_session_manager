@@ -224,6 +224,35 @@ def _infer_cwd(records):
     return ""
 
 
+_NOISE_PREFIXES = ("<local-command-caveat>", "<command-name>", "<command-message>",
+                   "<local-command-stdout>", "<local-command-stderr>")
+
+
+def _record_text(rec):
+    m = rec.get("message") or {}
+    c = m.get("content")
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "".join(p.get("text", "") for p in c
+                       if isinstance(p, dict) and p.get("type") == "text")
+    return ""
+
+
+def _clean_for_export(records):
+    """导出前剔除非对话噪声: cc_meta 元数据、Claude 的斜杠命令/本地命令 caveat 记录。"""
+    out = []
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        if r.get("type") == "cc_meta":
+            continue
+        if any(_record_text(r).strip().startswith(p) for p in _NOISE_PREFIXES):
+            continue
+        out.append(r)
+    return out
+
+
 # ---------------- Fork: 分析分叉点之后的文件改动 ----------------
 _EDIT_TOOLS = {"edit", "multiedit", "write", "notebookedit", "strreplace",
                "createfile", "searchreplace", "applypatch", "search_replace", "create_file"}
@@ -599,11 +628,12 @@ class Handler(BaseHTTPRequestHandler):
                 target = data.get("target")
                 cwd = data.get("cwd") or _infer_cwd(STATE["records"])
                 title = data.get("title") or ""
+                recs = _clean_for_export(STATE["records"])
                 try:
                     if target == "codex":
-                        res = codex_store.write_codex_session(STATE["records"], cwd=cwd, title=title)
+                        res = codex_store.write_codex_session(recs, cwd=cwd, title=title)
                     elif target == "claude":
-                        res = claude_store.write_claude_session(STATE["records"], cwd=cwd, title=title)
+                        res = claude_store.write_claude_session(recs, cwd=cwd, title=title)
                     else:
                         return self._send(400, {"ok": False, "error": "target 需为 codex / claude"})
                 except Exception as e:
