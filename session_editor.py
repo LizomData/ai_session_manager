@@ -37,6 +37,7 @@ from urllib.parse import urlparse, parse_qs
 
 import cursor_store
 import codex_store
+import claude_store
 
 # ---------------- 后端会话状态(单文件, 本地单用户) ----------------
 STATE = {"path": None, "records": [], "dirty": False, "errors": [], "origin": "jsonl"}
@@ -580,16 +581,22 @@ class Handler(BaseHTTPRequestHandler):
                     return self._send(500, {"ok": False, "error": str(e)})
                 return self._send(200, {"ok": True, "path": out_path, "sessionId": new_sid, "count": len(prefix)})
 
-            if u.path == "/api/export-codex":
+            if u.path == "/api/export-to":
                 if not STATE["records"]:
                     return self._send(400, {"ok": False, "error": "未打开会话"})
+                target = data.get("target")
                 cwd = data.get("cwd") or _infer_cwd(STATE["records"])
                 title = data.get("title") or ""
                 try:
-                    res = codex_store.write_codex_session(STATE["records"], cwd=cwd, title=title)
+                    if target == "codex":
+                        res = codex_store.write_codex_session(STATE["records"], cwd=cwd, title=title)
+                    elif target == "claude":
+                        res = claude_store.write_claude_session(STATE["records"], cwd=cwd, title=title)
+                    else:
+                        return self._send(400, {"ok": False, "error": "target 需为 codex / claude"})
                 except Exception as e:
                     return self._send(500, {"ok": False, "error": str(e)})
-                return self._send(200, {"ok": True, "cwd": cwd, **res})
+                return self._send(200, {"ok": True, "target": target, "cwd": cwd, **res})
 
             if u.path == "/api/save-local":
                 if not STATE["records"]:
@@ -733,7 +740,7 @@ INDEX_HTML = r"""<!doctype html>
   <button id="redoBtn" title="重做 Ctrl+Y" disabled>↷ 重做</button>
   <button id="bakBtn" title="备份管理/回滚">备份</button>
   <button id="saveLocalBtn" title="把当前会话(含改动)另存到工具目录的 saved_sessions/">存到本地</button>
-  <button id="toCodexBtn" title="转换为 Codex 会话并加入 Codex 对话历史(~/.codex)">转Codex</button>
+  <button id="exportToBtn" title="导出到其它 CLI 的会话历史(Claude / Codex)">导出到…</button>
   <button id="saveBtn" class="primary" disabled>保存</button>
   <button id="exportMd">导出MD</button>
   <button id="exportTxt">导出TXT</button>
@@ -1031,15 +1038,21 @@ async function forkFrom(idx){
   if(confirm(`已生成新会话:\n${j.path}\n\n${j.count} 条 · sessionId ${j.sessionId.slice(0,8)}…\n\n是否立即打开该 fork?`)) await openFile(j.path);
   else toast("已生成: "+j.path.split(/[\\/]/).pop());
 }
-async function toCodex(){
+async function exportTo(){
   if(!CUR_PATH){ toast("请先打开会话"); return; }
   await flushUpdates();
-  const cwd=prompt("目标 cwd(Codex 里归属的工作目录; 留空则自动推断):","");
-  const title=prompt("会话标题(显示在 Codex 历史里; 留空则取首条用户消息):","");
-  const body={}; if(cwd) body.cwd=cwd; if(title) body.title=title;
-  const j=await (await fetch("/api/export-codex",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
-  if(!j.ok){ toast("转换失败: "+j.error); return; }
-  alert(`已转换为 Codex 会话并登记到历史:\n${j.path}\n\nsession_id: ${j.session_id}\n消息数: ${j.count}\ncwd: ${j.cwd||"(空)"}\n\n在 Codex 里用 “codex resume” 或历史列表应能看到(标题即会话名)。`);
+  let target=(prompt("导出目标 CLI:  claude  或  codex","claude")||"").trim().toLowerCase();
+  if(!target) return;
+  if(target!=="claude"&&target!=="codex"){ toast("只支持 claude / codex"); return; }
+  const cwd=prompt(`目标 cwd(${target==="claude"?"决定 Claude 项目目录, 必填才能 resume":"Codex 归属工作目录"}; 留空则自动推断):`,"");
+  const title=prompt("会话标题(显示在历史里; 留空则取首条用户消息):","");
+  const body={target}; if(cwd) body.cwd=cwd; if(title) body.title=title;
+  const j=await (await fetch("/api/export-to",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
+  if(!j.ok){ toast("导出失败: "+j.error); return; }
+  const hint = target==="claude"
+    ? `在该 cwd 下运行 “claude --resume” 应能看到(会话在项目目录:\n${j.project_dir})`
+    : `在 Codex 里 “codex resume” 或历史列表应能看到`;
+  alert(`已导出到 ${target.toUpperCase()}:\n${j.path}\n\nsession_id: ${j.session_id}\n消息数: ${j.count}\ncwd: ${j.cwd||"(空)"}\n\n${hint}`);
 }
 async function saveLocal(){
   if(!CUR_PATH){ toast("请先打开会话"); return; }
@@ -1128,7 +1141,7 @@ $("#openPath").onclick=()=>openFile($("#pathInput").value.trim());
 $("#pathInput").addEventListener("keydown",e=>{ if(e.key==="Enter") openFile(e.target.value.trim()); });
 $("#saveBtn").onclick=save;
 $("#saveLocalBtn").onclick=saveLocal;
-$("#toCodexBtn").onclick=toCodex;
+$("#exportToBtn").onclick=exportTo;
 $("#undoBtn").onclick=undo; $("#redoBtn").onclick=redo;
 $("#exportMd").onclick=()=>exportAs("md"); $("#exportTxt").onclick=()=>exportAs("txt");
 $("#searchBtn").onclick=doSearch;
