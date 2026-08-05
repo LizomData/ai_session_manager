@@ -791,6 +791,7 @@ INDEX_HTML = r"""<!doctype html>
     <option value="saved">本地保存</option>
     <option value="other">其它</option>
   </select>
+  <input id="sessFilter" placeholder="筛选(名称/目录/cwd)" title="按文件名、项目目录、cwd 过滤会话" style="width:150px">
   <select id="sessions" title="选择会话文件"></select>
   <button id="reload" title="刷新会话列表">↻</button>
   <input id="pathInput" placeholder="或粘贴 .jsonl 绝对路径" style="width:210px">
@@ -894,7 +895,12 @@ async function flushUpdates(){
 let ALL_SESSIONS=[];
 function renderSessionOptions(){
   const src=$("#source").value;
-  const list=ALL_SESSIONS.filter(s=> src==="all"? true : s.source===src);
+  const q=($("#sessFilter").value||"").trim().toLowerCase();
+  const list=ALL_SESSIONS.filter(s=>{
+    if(src!=="all" && s.source!==src) return false;
+    if(q){ const hay=(s.name+" "+(s.dir||"")+" "+(s.from_cwd||"")).toLowerCase(); if(!hay.includes(q)) return false; }
+    return true;
+  });
   const sel=$("#sessions");
   const tag={claude:"[Claude]",cursor:"[Cursor]","cursor-chat":"[Cursor·db]",saved:"[本地]",other:"[其它]"};
   sel.innerHTML=`<option value="">— 选择会话 (${list.length}) —</option>`;
@@ -1243,6 +1249,7 @@ async function openBak(){
 // ---- 事件 ----
 $("#sessions").onchange=e=>openFile(e.target.value);
 $("#source").onchange=renderSessionOptions;
+$("#sessFilter").oninput=renderSessionOptions;
 $("#reload").onclick=loadSessions;
 $("#openPath").onclick=()=>openFile($("#pathInput").value.trim());
 $("#pathInput").addEventListener("keydown",e=>{ if(e.key==="Enter") openFile(e.target.value.trim()); });
