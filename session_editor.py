@@ -108,6 +108,13 @@ def discover_sessions(extra_dir=None):
                         "source": "cursor-chat", "cwd": s.get("cwd", "")})
     except Exception:
         pass
+    # Codex CLI 会话(rollout, 索引在 state_5.sqlite threads)
+    try:
+        for s in codex_store.discover_codex_sessions():
+            out.append({"path": s["path"], "name": s["name"], "dir": s["dir"], "size": s["size"],
+                        "mtime": s["mtime"], "source": "codex", "cwd": s.get("cwd", "")})
+    except Exception:
+        pass
     out.sort(key=lambda x: x["mtime"], reverse=True)
     return out
 
@@ -418,6 +425,9 @@ class Handler(BaseHTTPRequestHandler):
                 if os.path.basename(path).lower() == "store.db":
                     records, errors, origin = cursor_store.read_store(path), [], "cursor-store"
                     cwd = cursor_store.read_session_meta(os.path.dirname(path)).get("cwd", "")
+                elif codex_store.is_rollout(path):
+                    records, errors, origin = codex_store.read_rollout(path), [], "codex-rollout"
+                    cwd = codex_store._strip_ext_prefix(codex_store.read_rollout_meta(path).get("cwd", ""))
                 else:
                     records, errors, origin = (*load_jsonl(path), "jsonl")
                     cwd = _infer_cwd(records)
@@ -685,6 +695,9 @@ class Handler(BaseHTTPRequestHandler):
                 if STATE.get("origin") == "cursor-store":
                     return self._send(400, {"ok": False,
                         "error": "Cursor store.db 为只读(内容受完整性校验保护, 不可改写)"})
+                if STATE.get("origin") == "codex-rollout":
+                    return self._send(400, {"ok": False,
+                        "error": "Codex rollout 为只读打开; 请用「存到本地」另存为可编辑 jsonl"})
                 try:
                     bak = save_jsonl(path, STATE["records"])
                     STATE["dirty"] = False
@@ -788,6 +801,7 @@ INDEX_HTML = r"""<!doctype html>
     <option value="claude">Claude</option>
     <option value="cursor">Cursor(jsonl)</option>
     <option value="cursor-chat">Cursor 会话(store.db)</option>
+    <option value="codex">Codex 会话</option>
     <option value="saved">本地保存</option>
     <option value="other">其它</option>
   </select>
@@ -856,7 +870,7 @@ let CUR_CWD="";
 const ACTIVE_FILTER = new Set();
 const PRE_LIMIT = 4000;
 const SRC_LABEL = {claude:"Claude", cursor:"Cursor(jsonl)", "cursor-store":"Cursor 会话(store.db)",
-                   "cursor-chat":"Cursor 会话(store.db)", saved:"本地保存", jsonl:"jsonl", other:"其它"};
+                   "cursor-chat":"Cursor 会话(store.db)", codex:"Codex 会话", saved:"本地保存", jsonl:"jsonl", other:"其它"};
 
 const $ = s => document.querySelector(s);
 const listEl=$("#list"), emptyEl=$("#empty");
@@ -902,7 +916,7 @@ function renderSessionOptions(){
     return true;
   });
   const sel=$("#sessions");
-  const tag={claude:"[Claude]",cursor:"[Cursor]","cursor-chat":"[Cursor·db]",saved:"[本地]",other:"[其它]"};
+  const tag={claude:"[Claude]",cursor:"[Cursor]","cursor-chat":"[Cursor·db]",codex:"[Codex]",saved:"[本地]",other:"[其它]"};
   sel.innerHTML=`<option value="">— 选择会话 (${list.length}) —</option>`;
   for(const s of list){
     const o=document.createElement("option"); o.value=s.path;

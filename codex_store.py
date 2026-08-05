@@ -107,6 +107,119 @@ def _message_item(rec):
     return {"type": "message", "role": crole, "content": [{"type": ctype, "text": text}]}
 
 
+def _strip_ext_prefix(p):
+    return p[4:] if isinstance(p, str) and p.startswith("\\\\?\\") else p
+
+
+def discover_codex_sessions():
+    """列出 Codex 会话(优先读 state_5.sqlite threads, 带标题/cwd)。"""
+    out = []
+    db = os.path.join(codex_root(), "state_5.sqlite")
+    if os.path.isfile(db):
+        try:
+            con = sqlite3.connect(db)
+            try:
+                rows = con.execute(
+                    "SELECT id, rollout_path, title, cwd, updated_at_ms, first_user_message "
+                    "FROM threads WHERE archived=0 ORDER BY updated_at_ms DESC").fetchall()
+            finally:
+                con.close()
+            for sid, rp, title, cwd, ums, fum in rows:
+                if not rp or not os.path.isfile(rp):
+                    continue
+                try:
+                    sz = os.path.getsize(rp)
+                except OSError:
+                    sz = 0
+                out.append({"path": os.path.abspath(rp), "name": title or fum or sid,
+                            "dir": os.path.dirname(rp), "cwd": _strip_ext_prefix(cwd or ""),
+                            "size": sz, "mtime": (ums or 0) / 1000.0, "session_id": sid})
+            if out:
+                return out
+        except sqlite3.Error:
+            pass
+    # 回退: 扫描 rollout 文件
+    for f in glob.glob(os.path.join(sessions_root(), "**", "rollout-*.jsonl"), recursive=True):
+        try:
+            st = os.stat(f)
+        except OSError:
+            continue
+        out.append({"path": os.path.abspath(f), "name": os.path.basename(f),
+                    "dir": os.path.dirname(f), "cwd": "", "size": st.st_size, "mtime": st.st_mtime})
+    out.sort(key=lambda x: x["mtime"], reverse=True)
+    return out
+
+
+def is_rollout(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            first = f.readline().strip()
+        return bool(first) and json.loads(first).get("type") == "session_meta"
+    except (ValueError, OSError):
+        return False
+
+
+def read_rollout_meta(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            first = json.loads(f.readline())
+        if first.get("type") == "session_meta":
+            return first.get("payload", {})
+    except (ValueError, OSError):
+        pass
+    return {}
+
+
+def _norm_codex_content(content):
+    out = []
+    if not isinstance(content, list):
+        return [{"type": "text", "text": str(content)}]
+    for p in content:
+        if not isinstance(p, dict):
+            continue
+        t = p.get("type")
+        if t in ("input_text", "output_text", "text"):
+            out.append({"type": "text", "text": p.get("text", "")})
+        else:
+            out.append({"type": "text", "text": json.dumps(p, ensure_ascii=False)})
+    return out
+
+
+def read_rollout(path):
+    """把 Codex rollout 解析为编辑器可渲染的归一化记录(从 response_item 重建对话)。"""
+    records = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            if o.get("type") != "response_item":
+                continue
+            p = o.get("payload", {})
+            pt = p.get("type")
+            if pt == "message":
+                records.append({"role": p.get("role"),
+                                "message": {"content": _norm_codex_content(p.get("content", []))}})
+            elif pt in ("custom_tool_call", "function_call"):
+                records.append({"role": "assistant", "message": {"content": [
+                    {"type": "tool_use", "name": p.get("name"),
+                     "input": p.get("input", p.get("arguments"))}]}})
+            elif pt in ("custom_tool_call_output", "function_call_output"):
+                o2 = p.get("output")
+                if isinstance(o2, list):
+                    txt = "\n".join(x.get("text", "") for x in o2 if isinstance(x, dict))
+                else:
+                    txt = o2 if isinstance(o2, str) else json.dumps(o2, ensure_ascii=False)
+                records.append({"role": "tool", "message": {"content": [
+                    {"type": "tool_result", "content": txt}]}})
+            # reasoning 项为加密内容, 无明文, 跳过
+    return records
+
+
 def _register_thread(session_id, rollout_path, cwd, title, first_user_message, now_ms):
     """往 state_5.sqlite 的 threads 表插一行(这是 `codex resume` 真正读取的索引)。
 
