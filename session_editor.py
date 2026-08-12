@@ -260,6 +260,59 @@ def _clean_for_export(records):
     return out
 
 
+def _role_name(r):
+    return r.get("role") or (r.get("message") or {}).get("role") or r.get("type")
+
+
+def _prepare_export(records, lean=True, max_chars=0, last_n=0):
+    """按选项精简导出内容, 缓解目标 CLI 上下文过长。
+
+    lean: 只保留 user/assistant, 并去掉 tool_use/tool_result/thinking 块(体积大头)。
+    max_chars: 每个文本块上限(0=不限)。
+    last_n: 只保留最近 N 条(0=全部)。
+    """
+    def cut(t):
+        return t[:max_chars] + "…[截断]" if max_chars > 0 and len(t) > max_chars else t
+
+    out = []
+    for r in _clean_for_export(records):
+        if lean and _role_name(r) not in ("user", "assistant"):
+            continue
+        m = r.get("message") or {}
+        c = m.get("content")
+        if isinstance(c, str):
+            newc = cut(c)
+        elif isinstance(c, list):
+            parts = []
+            for p in c:
+                if not isinstance(p, dict):
+                    continue
+                t = p.get("type")
+                if lean and t in ("tool_use", "tool_result", "thinking"):
+                    continue
+                if t in ("text", "thinking") and (p.get("text") or p.get("thinking")):
+                    q = dict(p)
+                    if "text" in q:
+                        q["text"] = cut(q["text"])
+                    if "thinking" in q:
+                        q["thinking"] = cut(q["thinking"])
+                    parts.append(q)
+                else:
+                    parts.append(p)
+            if not parts:
+                continue
+            newc = parts
+        else:
+            continue
+        nr = dict(r)
+        nr["message"] = dict(m)
+        nr["message"]["content"] = newc
+        out.append(nr)
+    if last_n > 0:
+        out = out[-last_n:]
+    return out
+
+
 # ---------------- Fork: 分析分叉点之后的文件改动 ----------------
 _EDIT_TOOLS = {"edit", "multiedit", "write", "notebookedit", "strreplace",
                "createfile", "searchreplace", "applypatch", "search_replace", "create_file"}
@@ -638,7 +691,14 @@ class Handler(BaseHTTPRequestHandler):
                 target = data.get("target")
                 cwd = data.get("cwd") or _infer_cwd(STATE["records"])
                 title = data.get("title") or ""
-                recs = _clean_for_export(STATE["records"])
+                opts = data.get("options") or {}
+                try:
+                    recs = _prepare_export(STATE["records"],
+                                           lean=bool(opts.get("lean", True)),
+                                           max_chars=int(opts.get("maxChars", 0) or 0),
+                                           last_n=int(opts.get("lastN", 0) or 0))
+                except (TypeError, ValueError):
+                    recs = _clean_for_export(STATE["records"])
                 try:
                     if target == "codex":
                         res = codex_store.write_codex_session(recs, cwd=cwd, title=title)
@@ -856,6 +916,11 @@ INDEX_HTML = r"""<!doctype html>
   </div>
   <div class="erow"><span class="elabel">工作目录 cwd</span><input id="ecwd" placeholder="决定归属工作区" style="flex:1"></div>
   <div class="erow"><span class="elabel">标题</span><input id="etitle" placeholder="留空取首条用户消息" style="flex:1"></div>
+  <div class="erow"><span class="elabel">内容</span>
+    <label class="eopt"><input type="checkbox" id="elean" checked> 精简(仅正文,去工具/思考)</label>
+  </div>
+  <div class="erow"><span class="elabel">每条上限</span><input id="emax" type="number" min="0" value="8000" style="width:90px"> 字符(0=不限)</div>
+  <div class="erow"><span class="elabel">最近条数</span><input id="elastn" type="number" min="0" value="0" style="width:90px"> 条(0=全部)</div>
   <div class="hint" id="ehint" style="margin-top:6px"></div>
   <div style="text-align:right;margin-top:14px">
     <button id="exportCancel">取消</button>
@@ -1167,7 +1232,10 @@ async function doExport(){
   const title=$("#etitle").value.trim();
   if(target==="claude" && !cwd){ toast("Claude 需要填 cwd 才能 resume"); return; }
   await flushUpdates();
-  const body={target}; if(cwd) body.cwd=cwd; if(title) body.title=title;
+  const options={ lean: $("#elean").checked,
+                  maxChars: parseInt($("#emax").value,10)||0,
+                  lastN: parseInt($("#elastn").value,10)||0 };
+  const body={target, options}; if(cwd) body.cwd=cwd; if(title) body.title=title;
   const j=await (await fetch("/api/export-to",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})).json();
   if(!j.ok){ toast("导出失败: "+j.error); return; }
   $("#exportModal").classList.remove("on");
