@@ -829,6 +829,22 @@ INDEX_HTML = r"""<!doctype html>
   .block.think{background:var(--think)}.block.tool_use{background:var(--tool)}.block.tool_result{background:var(--tool)}
   textarea{width:100%;min-height:38px;resize:vertical;font:13px/1.5 ui-monospace,"Cascadia Code",Consolas,monospace;background:transparent;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px}
   textarea.text{font-family:inherit}
+  .md{font:14px/1.65 inherit;word-break:break-word}
+  .md p{margin:0 0 .7em}.md p:last-child{margin-bottom:0}
+  .md h1,.md h2,.md h3,.md h4{margin:.9em 0 .4em;font-weight:650;line-height:1.3}
+  .md h1{font-size:1.4em}.md h2{font-size:1.22em}.md h3{font-size:1.08em}.md h4{font-size:1em}
+  .md ul,.md ol{margin:.3em 0 .7em;padding-left:1.6em}
+  .md li{margin:.15em 0}
+  .md blockquote{margin:.4em 0;padding:2px 10px;border-left:3px solid var(--accent);color:var(--muted)}
+  .md pre.md-code{background:var(--chip);padding:10px 12px;border-radius:6px;max-height:420px;color:var(--text);font-size:12.5px}
+  .md code{font:12.5px/1.5 ui-monospace,Consolas,monospace;background:var(--chip);padding:.1em .35em;border-radius:4px}
+  .md pre.md-code code{background:none;padding:0}
+  .md a{color:var(--accent)}
+  .md table{border-collapse:collapse;margin:.5em 0;font-size:13px;max-width:100%;overflow:auto;display:block}
+  .md th,.md td{border:1px solid var(--border);padding:4px 8px}
+  .md th{background:var(--chip)}
+  .md hr{border:none;border-top:1px solid var(--border);margin:.8em 0}
+  .md img{max-width:100%;border-radius:6px}
   pre{margin:0;white-space:pre-wrap;word-break:break-word;font:12px/1.5 ui-monospace,Consolas,monospace;color:var(--muted);max-height:220px;overflow:auto}
   .empty{color:var(--muted);text-align:center;padding:60px 0}
   .pager{display:none;gap:8px;align-items:center;justify-content:center;flex-wrap:wrap;padding:8px 0}
@@ -1045,6 +1061,98 @@ function roleOf(rec){
   return rec.role||(rec.message&&rec.message.role)||rec.type||"?";   // Cursor 顶层 role / Claude message.role
 }
 
+
+function escHtml(s){
+  return (""+s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+function renderMd(src){
+  const fences=[];
+  let raw=(""+(src||"")).replace(/\r\n/g,"\n");
+  raw=raw.replace(/```([^\n]*)\n([\s\S]*?)```/g,(_,lang,code)=>{
+    fences.push('<pre class="md-code"><code>'+escHtml(code.replace(/\n$/,""))+"</code></pre>");
+    return "\n%%F"+(fences.length-1)+"%%\n";
+  });
+  const inline=t=>{
+    t=escHtml(t);
+    t=t.replace(/`([^`]+)`/g,"<code>$1</code>");
+    t=t.replace(/!\[([^\]]*)\]\((https?:[^)\s]+)\)/g,'<img alt="$1" src="$2">');
+    t=t.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+    t=t.replace(/\*\*([^*]+)\*\*/g,"<strong>$1</strong>");
+    t=t.replace(/__([^_]+)__/g,"<strong>$1</strong>");
+    t=t.replace(/~~([^~]+)~~/g,"<del>$1</del>");
+    t=t.replace(/(^|[^*])\*([^*\n]+)\*/g,"$1<em>$2</em>");
+    t=t.replace(/(^|[^_])_([^_\n]+)_/g,"$1<em>$2</em>");
+    return t;
+  };
+  const fenceOf=l=>{ const m=/^%%F(\d+)%%$/.exec((l||"").trim()); return m?fences[+m[1]]:null; };
+  const lines=raw.split("\n"), out=[];
+  let i=0;
+  while(i<lines.length){
+    const l=lines[i], f=fenceOf(l);
+    if(f){ out.push(f); i++; continue; }
+    if(/^\s*$/.test(l)){ i++; continue; }
+    const hm=/^(#{1,4})\s+(.+)$/.exec(l);
+    if(hm){ const n=hm[1].length; out.push("<h"+n+">"+inline(hm[2])+"</h"+n+">"); i++; continue; }
+    if(/^(-{3,}|\*{3,}|_{3,})$/.test(l.trim())){ out.push("<hr>"); i++; continue; }
+    if(/^>\s?/.test(l)){
+      const qs=[];
+      while(i<lines.length && /^>\s?/.test(lines[i])){ qs.push(lines[i].replace(/^>\s?/, "")); i++; }
+      out.push("<blockquote>"+qs.map(inline).join("<br>")+"</blockquote>"); continue;
+    }
+    if(/^\|.+\|/.test(l) && i+1<lines.length && /^\|?[\s:|-]+$/.test(lines[i+1]) && /---/.test(lines[i+1])){
+      const split=row=>row.replace(/^\||\|$/g,"").split("|").map(x=>x.trim());
+      const heads=split(l); i+=2;
+      const rows=[];
+      while(i<lines.length && /^\|.+\|/.test(lines[i])){ rows.push(split(lines[i])); i++; }
+      out.push("<table><thead><tr>"+heads.map(h=>"<th>"+inline(h)+"</th>").join("")+"</tr></thead><tbody>"+
+        rows.map(r=>"<tr>"+r.map(c=>"<td>"+inline(c)+"</td>").join("")+"</tr>").join("")+"</tbody></table>");
+      continue;
+    }
+    if(/^\s*([-*+]|\d+\.)\s+/.test(l)){
+      const ordered=/^\s*\d+\./.test(l), items=[];
+      while(i<lines.length && /^\s*([-*+]|\d+\.)\s+/.test(lines[i])){
+        items.push(lines[i].replace(/^\s*([-*+]|\d+\.)\s+/, "")); i++;
+      }
+      const tag=ordered?"ol":"ul";
+      out.push("<"+tag+">"+items.map(x=>{
+        const t=/^\[(x|X| )\]\s+(.*)$/.exec(x);
+        if(t) return "<li><input type=checkbox disabled"+(t[1]===" "?" ":" checked ")+"> "+inline(t[2])+"</li>";
+        return "<li>"+inline(x)+"</li>";
+      }).join("")+"</"+tag+">");
+      continue;
+    }
+    const para=[l]; i++;
+    while(i<lines.length){
+      const n=lines[i];
+      if(!n.trim() || fenceOf(n) || /^(#{1,4}\s|>\s?|-{3,}|\*{3,}|_{3,}|\s*([-*+]|\d+\.)\s+)/.test(n) || /^\|.+\|/.test(n)) break;
+      para.push(n); i++;
+    }
+    out.push("<p>"+para.map(inline).join("<br>")+"</p>");
+  }
+  return out.join("");
+}
+function mountTextBlock(bd, label, b, idx, rec){
+  const btn=document.createElement("button"); btn.className="more"; btn.textContent="编辑"; btn.title="编辑原文 / 预览 Markdown";
+  label.appendChild(btn);
+  const view=document.createElement("div"); view.className="md";
+  const ta=document.createElement("textarea"); ta.className="text"; ta.style.display="none";
+  let editing=false;
+  const grow=()=>{ ta.style.height="auto"; ta.style.height=Math.min(ta.scrollHeight+2,600)+"px"; };
+  const showView=()=>{
+    editing=false; btn.textContent="编辑"; ta.style.display="none"; view.style.display="block";
+    view.innerHTML=renderMd(b.get()||"");
+  };
+  const showEdit=()=>{
+    editing=true; btn.textContent="预览"; view.style.display="none"; ta.style.display="block";
+    ta.value=b.get()||""; grow(); ta.focus();
+  };
+  btn.onclick=()=>{ if(editing){ b.set(ta.value); scheduleUpdate(idx,rec); showView(); } else showEdit(); };
+  view.addEventListener("dblclick", showEdit);
+  ta.addEventListener("input",()=>{ b.set(ta.value); scheduleUpdate(idx,rec); grow(); });
+  ta.addEventListener("keydown",e=>{ if(e.key==="Escape"){ b.set(ta.value); scheduleUpdate(idx,rec); showView(); } });
+  bd.appendChild(view); bd.appendChild(ta); showView();
+}
+
 function renderRecord(rec, idx){
   const role=roleOf(rec);
   const el=document.createElement("div"); el.className="msg "+role; el.dataset.idx=idx;
@@ -1081,8 +1189,10 @@ function renderRecord(rec, idx){
       t.innerHTML=rows.map(([k,v])=>`<div style="display:flex;gap:8px;margin:2px 0"><span style="color:var(--muted);min-width:92px">${k}</span><span style="word-break:break-all">${esc(v)}</span></div>`).join("");
       bd.appendChild(t); body.appendChild(bd); continue;
     }
-    if(b.editable){
-      const ta=document.createElement("textarea"); if(b.kind==="text"||b.kind==="summary") ta.className="text";
+    if(b.editable && (b.kind==="text"||b.kind==="summary")){
+      mountTextBlock(bd, label, b, idx, rec);
+    }else if(b.editable){
+      const ta=document.createElement("textarea");
       ta.value=b.get();
       const grow=()=>{ ta.style.height="auto"; ta.style.height=Math.min(ta.scrollHeight+2,600)+"px"; };
       ta.addEventListener("input",()=>{ b.set(ta.value); scheduleUpdate(idx,rec); grow(); });
