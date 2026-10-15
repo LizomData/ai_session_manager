@@ -540,9 +540,9 @@ const SRC = {
 };
 const SRC_ORDER = ["claude", "codex", "cursor", "cursor-chat", "saved", "other"];
 const STYLE = {
-  claude: { accent: "var(--agent-claude)", glyph: "✻", step: "⏺", think: "✻", thinkLabel: "思考", call: true, conn: "⎿" },
+  claude: { accent: "var(--agent-claude)", glyph: "✻", step: "⏺", think: "✻", thinkLabel: "思考中…", call: true, conn: "⎿" },
   codex: { accent: "var(--agent-codex)", glyph: "◎", step: "•", think: "•", thinkLabel: "推理", call: false, conn: "└" },
-  cursor: { accent: "var(--agent-cursor)", glyph: "◆", step: "⏺", think: "✻", thinkLabel: "思考", call: true, conn: "⎿" },
+  cursor: { accent: "var(--agent-cursor)", glyph: "◆", step: "⏺", think: "✻", thinkLabel: "思考中…", call: true, conn: "⎿" },
   generic: { accent: "var(--agent-generic)", glyph: "•", step: "•", think: "•", thinkLabel: "思考", call: true, conn: "└" },
 };
 const STATUS_TEXT = { success: "成功", error: "失败", interrupted: "已中断", pending: "进行中", unknown: "未知" };
@@ -1483,11 +1483,20 @@ function outEl(tv, s, d, preview) {
 }
 function thinkEl(tv, s) {
   const st = curStyle();
+  const dur = s.dur ? fmtDur(s.dur) : "";
+  if (s.red) {
+    // 思考正文被加密(只有签名): 和 cc-switch 一样只显示一行, 不可展开
+    return h("div.step", { "data-step": s.id, "data-idxs": String(s.idx) },
+      h("div.step-static.think-row", { title: "这段思考的内容已加密，记录里没有明文" + (dur ? "（用时 " + dur + "）" : "") },
+        h("span.gl.faint", null, st.think), h("span.lbl", null, st.thinkLabel),
+        h("span.faint.trunc", null, "思考内容不可见"),
+        dur ? h("span.step-meta", null, dur) : null));
+  }
   const open = !!S.stepOv.get(s.id);
   const btn = h("button.step-btn.think-row" + (open ? ".open" : ""), { type: "button", "aria-expanded": String(open) },
     h("span.gl.faint", null, st.think), h("span.lbl", null, st.thinkLabel),
     !open ? h("span.faint.trunc", { style: { fontStyle: "italic" } }, oneLine(s.pv, 160)) : null,
-    h("span.step-meta", null, fmtChars(s.chars) + " 字", icon("chevR", "sm chev")));
+    h("span.step-meta", null, fmtChars(s.chars) + " 字" + (dur ? " · " + dur : ""), icon("chevR", "sm chev")));
   btn.addEventListener("click", () => { S.stepOv.set(s.id, !open); rerenderStep(tv, s); });
   const wrap = h("div.step", { "data-step": s.id, "data-idxs": String(s.idx) }, btn);
   if (open) {

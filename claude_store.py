@@ -54,7 +54,7 @@ def _text_of(content):
         t = p.get("type")
         if t == "text":
             parts.append(p.get("text", ""))
-        elif t == "thinking":
+        elif t == "thinking" and (p.get("thinking") or "").strip():   # 加密的空思考块不导出
             parts.append("[思考]\n" + p.get("thinking", ""))
         elif t == "tool_use":
             parts.append("[工具调用 %s]\n%s" % (p.get("name"), json.dumps(p.get("input"), ensure_ascii=False)))

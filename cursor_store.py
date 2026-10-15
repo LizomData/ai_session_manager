@@ -135,7 +135,10 @@ def _norm_part(p):
     if t == "text":
         return {"type": "text", "text": p.get("text", "")}
     if t == "reasoning":
-        return {"type": "thinking", "thinking": p.get("text", "")}
+        out = {"type": "thinking", "thinking": p.get("text", "")}
+        if not out["thinking"] and p.get("signature"):
+            out["redacted"] = True   # 正文为空、带签名: 思考内容被加密(不保留签名本身, 太长)
+        return out
     if t in ("tool-call", "tool_use"):
         return {"type": "tool_use", "name": p.get("toolName") or p.get("name"),
                 "input": p.get("args", p.get("input", {})),

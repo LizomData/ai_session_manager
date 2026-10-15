@@ -731,8 +731,13 @@ def agent_items(rec, i):
                     out.append(("text", i, b, tx))
             elif ty in ("thinking", "redacted_thinking", "reasoning"):
                 tx = p.get("thinking") or p.get("text") or ""
-                if isinstance(tx, str) and tx.strip():
-                    out.append(("think", i, b, tx))
+                if not isinstance(tx, str):
+                    tx = ""
+                if tx.strip():
+                    out.append(("think", i, b, tx, False))
+                elif ty == "redacted_thinking" or p.get("signature") or p.get("redacted"):
+                    # 正文为空但带签名: 思考内容被加密, 照 cc-switch 显示一行「思考内容不可见」
+                    out.append(("think", i, b, "", True))
             elif ty in ("tool_use", "server_tool_use"):
                 out.append(("call", i, b, p))
             elif ty == "image":
@@ -823,8 +828,11 @@ def walk_turn(records, cats, first, last, t, ctx, full):
                     items.append(it)
                 elif kind == "think":
                     st = {"kind": "thinking", "id": "%d:%d" % (i, it[2]), "idx": i, "b": it[2],
-                          "chars": len(it[3])}
-                    if full:
+                          "chars": len(it[3]), "red": it[4]}
+                    dur = rec.get("thinkingDurationMs")
+                    if isinstance(dur, (int, float)) and dur > 0:
+                        st["dur"] = int(dur)
+                    if full and not it[4]:
                         st["pv"] = it[3][:THINK_PREVIEW]
                     items.append(("step", st))
                 elif kind == "call":
@@ -1221,7 +1229,7 @@ def transcript_markdown(records, index, ctx, agent_name, include_steps=True, inc
             body += ["", "</details>", ""]
         if include_thinking:
             for s in tv["steps"]:
-                if s["kind"] == "thinking":
+                if s["kind"] == "thinking" and not s.get("red"):
                     full_t = get_block(records[s["idx"]], s["b"], "thinking")
                     body += ["> 思考：" + full_t.strip().replace("\n", "\n> "), ""]
         if tv["final"]:

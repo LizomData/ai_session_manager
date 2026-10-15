@@ -419,6 +419,8 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; }
   border-bottom: 1px solid var(--border); }
 .diff .dgap { padding: 0 12px; color: var(--text-3); user-select: none; }
 .think-row .lbl { font-style: italic; color: var(--text-2); flex: none; }
+.step-static { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; height: 32px; padding: 0 6px;
+  font-size: 12px; color: var(--text-2); }
 .think-body { padding: 0 6px 10px 30px; font-size: 12px; line-height: 19px; color: var(--text-2); font-style: italic;
   white-space: pre-wrap; word-break: break-word; }
 .rot { transform: rotate(90deg); }

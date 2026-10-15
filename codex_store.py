@@ -79,7 +79,7 @@ def _text_of(content):
         t = p.get("type")
         if t == "text":
             parts.append(p.get("text", ""))
-        elif t == "thinking":
+        elif t == "thinking" and (p.get("thinking") or "").strip():   # 加密的空思考块不导出
             parts.append("[思考]\n" + p.get("thinking", ""))
         elif t == "tool_use":
             parts.append("[工具调用 %s]\n%s" % (p.get("name"), json.dumps(p.get("input"), ensure_ascii=False)))
@@ -253,7 +253,16 @@ def read_rollout(path):
                 if p.get("call_id"):
                     block["tool_use_id"] = p["call_id"]
                 rec = {"role": "tool", "message": {"content": [block]}}
-            # reasoning 项为加密内容, 无明文, 跳过
+            elif pt == "reasoning":
+                # 推理正文是加密的; 有摘要就显示摘要, 没有则标成「内容不可见」
+                summ = p.get("summary") if isinstance(p.get("summary"), list) else []
+                txt = "\n\n".join(x["text"] for x in summ if isinstance(x, dict) and isinstance(x.get("text"), str))
+                block = {"type": "thinking", "thinking": txt}
+                if not txt.strip():
+                    block["redacted"] = True
+                rec = {"role": "assistant", "message": {"content": [block]}}
+                if model:
+                    rec["message"]["model"] = model
             if rec is not None:
                 if ts:
                     rec["timestamp"] = ts
