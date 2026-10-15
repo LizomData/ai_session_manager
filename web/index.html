@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>会话管理器</title>
+<link rel="stylesheet" href="app.css">
+<script>
+  // 主题在样式表之后立即生效, 避免先闪一下浅色
+  try { var t = localStorage.getItem("sm.theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="side" id="side" aria-label="会话列表">
+    <div class="side-head">
+      <span class="brand" id="brand"></span>
+      <span class="spacer"></span>
+      <span id="sideActions" class="row-gap"></span>
+    </div>
+    <div class="side-tools" id="sideTools"></div>
+    <div class="side-search" id="sideSearch"></div>
+    <div class="side-list" id="sideList" role="list"></div>
+  </aside>
+  <div class="side-scrim" id="sideScrim"></div>
+  <main class="main" id="main">
+    <div class="welcome" id="welcome"></div>
+    <section class="reader" id="reader" hidden>
+      <header class="r-head" id="rHead"></header>
+      <div class="r-bar" id="rBar"></div>
+      <div class="r-body">
+        <div class="r-scroll" id="rScroll" role="region" aria-label="对话内容">
+          <div class="r-col" id="rCol"></div>
+        </div>
+        <button class="btn latest" id="latestBtn" hidden></button>
+        <nav class="outline" id="outline" aria-label="对话目录" hidden></nav>
+      </div>
+    </section>
+  </main>
+</div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+<div id="layer"></div>
+<script src="app.js"></script>
+</body>
+</html>

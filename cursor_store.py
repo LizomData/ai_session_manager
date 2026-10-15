@@ -212,6 +212,7 @@ def discover_chat_sessions():
                 "session_id": sid, "group": group,
                 "title": meta.get("title", ""), "cwd": meta.get("cwd", ""),
                 "has_conversation": meta.get("hasConversation", False),
+                "created": meta.get("createdAtMs") or None,
                 "size": st.st_size,
                 "mtime": (meta.get("updatedAtMs", 0) / 1000.0) or st.st_mtime,
             })

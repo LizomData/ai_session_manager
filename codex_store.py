@@ -185,9 +185,25 @@ def _norm_codex_content(content):
     return out
 
 
+def _parse_args(v):
+    """function_call.arguments 是 JSON 字符串; 能解析成对象就解析, 否则原样保留。"""
+    if isinstance(v, str):
+        try:
+            j = json.loads(v)
+            if isinstance(j, dict):
+                return j
+        except ValueError:
+            pass
+    return v
+
+
 def read_rollout(path):
-    """把 Codex rollout 解析为编辑器可渲染的归一化记录(从 response_item 重建对话)。"""
+    """把 Codex rollout 解析为编辑器可渲染的归一化记录(从 response_item 重建对话)。
+
+    保留 call_id(工具调用与结果配对)、时间戳和 turn_context 里的模型名, 供阅读视图使用。
+    """
     records = []
+    model = None
     with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -197,26 +213,51 @@ def read_rollout(path):
                 o = json.loads(line)
             except ValueError:
                 continue
+            p = o.get("payload", {})
+            if not isinstance(p, dict):
+                continue
+            if o.get("type") == "turn_context":
+                if isinstance(p.get("model"), str) and p["model"]:
+                    model = p["model"]
+                continue
             if o.get("type") != "response_item":
                 continue
-            p = o.get("payload", {})
+            ts = o.get("timestamp")
             pt = p.get("type")
+            rec = None
             if pt == "message":
-                records.append({"role": p.get("role"),
-                                "message": {"content": _norm_codex_content(p.get("content", []))}})
-            elif pt in ("custom_tool_call", "function_call"):
-                records.append({"role": "assistant", "message": {"content": [
-                    {"type": "tool_use", "name": p.get("name"),
-                     "input": p.get("input", p.get("arguments"))}]}})
-            elif pt in ("custom_tool_call_output", "function_call_output"):
+                rec = {"role": p.get("role"),
+                       "message": {"content": _norm_codex_content(p.get("content", []))}}
+                if p.get("role") == "assistant" and model:
+                    rec["message"]["model"] = model
+            elif pt in ("custom_tool_call", "function_call", "local_shell_call", "web_search_call"):
+                if pt == "local_shell_call":
+                    name, inp = "local_shell", (p.get("action") or {})
+                elif pt == "web_search_call":
+                    name, inp = "web_search", (p.get("action") or {})
+                else:
+                    name, inp = p.get("name"), _parse_args(p.get("input", p.get("arguments")))
+                block = {"type": "tool_use", "name": name, "input": inp}
+                if p.get("call_id"):
+                    block["id"] = p["call_id"]
+                rec = {"role": "assistant", "message": {"content": [block]}}
+                if model:
+                    rec["message"]["model"] = model
+            elif pt in ("custom_tool_call_output", "function_call_output", "local_shell_call_output"):
                 o2 = p.get("output")
                 if isinstance(o2, list):
                     txt = "\n".join(x.get("text", "") for x in o2 if isinstance(x, dict))
                 else:
                     txt = o2 if isinstance(o2, str) else json.dumps(o2, ensure_ascii=False)
-                records.append({"role": "tool", "message": {"content": [
-                    {"type": "tool_result", "content": txt}]}})
+                block = {"type": "tool_result", "content": txt}
+                if p.get("call_id"):
+                    block["tool_use_id"] = p["call_id"]
+                rec = {"role": "tool", "message": {"content": [block]}}
             # reasoning 项为加密内容, 无明文, 跳过
+            if rec is not None:
+                if ts:
+                    rec["timestamp"] = ts
+                records.append(rec)
     return records
 
 
