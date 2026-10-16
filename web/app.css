@@ -421,6 +421,9 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; }
 .think-row .lbl { font-style: italic; color: var(--text-2); flex: none; }
 .step-static { display: flex; align-items: center; gap: 8px; width: 100%; min-width: 0; height: 32px; padding: 0 6px;
   font-size: 12px; color: var(--text-2); }
+.cipher-box { display: flex; flex-direction: column; gap: 6px; padding: 0 6px 10px 30px; }
+pre.cipher { margin: 4px 0 0; max-height: 220px; overflow: auto; padding: 8px 12px; border-radius: 8px; background: var(--bg-subtle);
+  font: 11.5px/17px var(--mono); color: var(--text-3); white-space: pre-wrap; word-break: break-all; }
 .think-body { padding: 0 6px 10px 30px; font-size: 12px; line-height: 19px; color: var(--text-2); font-style: italic;
   white-space: pre-wrap; word-break: break-word; }
 .rot { transform: rotate(90deg); }

@@ -260,6 +260,8 @@ def read_rollout(path):
                 block = {"type": "thinking", "thinking": txt}
                 if not txt.strip():
                     block["redacted"] = True
+                    if isinstance(p.get("encrypted_content"), str):
+                        block["encrypted_content"] = p["encrypted_content"]   # 密文原文, 可展开查看
                 rec = {"role": "assistant", "message": {"content": [block]}}
                 if model:
                     rec["message"]["model"] = model

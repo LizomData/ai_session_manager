@@ -715,6 +715,12 @@ def _attach_result(step, i, b, p, ts, tur, full):
         step["pv"] = _preview(text, FAIL_PREVIEW_LINES, FAIL_PREVIEW_CHARS)
 
 
+def cipher_of(p):
+    """加密思考块的密文原文(按原样返回, 不做任何解码)。"""
+    v = p.get("signature") or p.get("data") or p.get("encrypted_content") or ""
+    return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False)
+
+
 def agent_items(rec, i):
     content = content_of(rec)
     if isinstance(content, str):
@@ -734,10 +740,10 @@ def agent_items(rec, i):
                 if not isinstance(tx, str):
                     tx = ""
                 if tx.strip():
-                    out.append(("think", i, b, tx, False))
-                elif ty == "redacted_thinking" or p.get("signature") or p.get("redacted"):
-                    # 正文为空但带签名: 思考内容被加密, 照 cc-switch 显示一行「思考内容不可见」
-                    out.append(("think", i, b, "", True))
+                    out.append(("think", i, b, tx, False, 0))
+                elif ty == "redacted_thinking" or p.get("signature") or p.get("redacted") or p.get("encrypted_content"):
+                    # 正文为空、只有密文: 照 cc-switch 显示一行「思考内容不可见」, 可展开看密文原文
+                    out.append(("think", i, b, "", True, len(cipher_of(p))))
             elif ty in ("tool_use", "server_tool_use"):
                 out.append(("call", i, b, p))
             elif ty == "image":
@@ -828,7 +834,7 @@ def walk_turn(records, cats, first, last, t, ctx, full):
                     items.append(it)
                 elif kind == "think":
                     st = {"kind": "thinking", "id": "%d:%d" % (i, it[2]), "idx": i, "b": it[2],
-                          "chars": len(it[3]), "red": it[4]}
+                          "chars": len(it[3]), "red": it[4], "cipher": it[5]}
                     dur = rec.get("thinkingDurationMs")
                     if isinstance(dur, (int, float)) and dur > 0:
                         st["dur"] = int(dur)
@@ -1100,6 +1106,8 @@ def get_block(rec, b, field):
         return p.get("text", "") or ""
     if field == "thinking":
         return p.get("thinking") or p.get("text") or ""
+    if field == "cipher":
+        return cipher_of(p)
     if field == "content":
         return result_text(p)
     if field == "input":

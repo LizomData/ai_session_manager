@@ -573,7 +573,7 @@ const S = {
   pages: [], page: 0, turns: [], olCur: null,
   turnOv: new Map(), stepOv: new Map(), details: new Map(),
   textOpen: new Set(), fullText: new Map(), evOpen: new Set(), injOpen: new Map(),
-  outAll: new Set(), fullOut: new Map(), thinkFull: new Map(), paramsAll: new Map(),
+  outAll: new Set(), fullOut: new Map(), thinkFull: new Map(), paramsAll: new Map(), cipherText: new Map(),
   find: { open: false, q: "", hits: [], total: 0, pos: 0, busy: false, trunc: false, pend: null, ranQ: "" },
   recs: { page: 0, size: parseInt(lsGet("recSize", "50"), 10) || 50, total: 0, items: [], filter: new Set() },
   editing: 0,
@@ -581,7 +581,7 @@ const S = {
 const curStyle = () => STYLE[S.m.style] || STYLE.generic;
 const agentName = () => S.m.agent || "助手";
 function resetReaderState() {
-  for (const k of ["turnOv", "stepOv", "details", "fullText", "injOpen", "fullOut", "thinkFull", "paramsAll"]) S[k].clear();
+  for (const k of ["turnOv", "stepOv", "details", "fullText", "injOpen", "fullOut", "thinkFull", "paramsAll", "cipherText"]) S[k].clear();
   for (const k of ["textOpen", "evOpen", "outAll"]) S[k].clear();
   S.find = { open: false, q: "", hits: [], total: 0, pos: 0, busy: false, trunc: false, pend: null, ranQ: "" };
   S.recs.page = 0;
@@ -1485,12 +1485,35 @@ function thinkEl(tv, s) {
   const st = curStyle();
   const dur = s.dur ? fmtDur(s.dur) : "";
   if (s.red) {
-    // 思考正文被加密(只有签名): 和 cc-switch 一样只显示一行, 不可展开
-    return h("div.step", { "data-step": s.id, "data-idxs": String(s.idx) },
-      h("div.step-static.think-row", { title: "这段思考的内容已加密，记录里没有明文" + (dur ? "（用时 " + dur + "）" : "") },
-        h("span.gl.faint", null, st.think), h("span.lbl", null, st.thinkLabel),
-        h("span.faint.trunc", null, "思考内容不可见"),
-        dur ? h("span.step-meta", null, dur) : null));
+    // 思考正文被加密: 一行「思考内容不可见」; 有密文时可展开, 按原样显示密文(不解码)
+    if (!s.cipher) {
+      return h("div.step", { "data-step": s.id, "data-idxs": String(s.idx) },
+        h("div.step-static.think-row", { title: "这段思考的内容已加密，记录里没有明文" + (dur ? "（用时 " + dur + "）" : "") },
+          h("span.gl.faint", null, st.think), h("span.lbl", null, st.thinkLabel),
+          h("span.faint.trunc", null, "思考内容不可见"),
+          dur ? h("span.step-meta", null, dur) : null));
+    }
+    const ropen = !!S.stepOv.get(s.id);
+    const rbtn = h("button.step-btn.think-row" + (ropen ? ".open" : ""), { type: "button", "aria-expanded": String(ropen), title: "展开查看密文" },
+      h("span.gl.faint", null, st.think), h("span.lbl", null, st.thinkLabel),
+      h("span.faint.trunc", null, "思考内容不可见"),
+      h("span.step-meta", null, "密文 " + fmtChars(s.cipher) + " 字符" + (dur ? " · " + dur : ""), icon("chevR", "sm chev")));
+    rbtn.addEventListener("click", () => { S.stepOv.set(s.id, !ropen); rerenderStep(tv, s); });
+    const rwrap = h("div.step", { "data-step": s.id, "data-idxs": String(s.idx) }, rbtn);
+    if (ropen) {
+      const text = S.cipherText.get(s.id);
+      if (text === undefined) {
+        api("/api/block?idx=" + s.idx + "&b=" + s.b + "&f=cipher").then((j) => { S.cipherText.set(s.id, j.text); rerenderStep(tv, s); })
+          .catch((e) => toast(e.message, true));
+      }
+      rwrap.append(h("div.cipher-box", null,
+        h("div.form-hint", null, "这段思考由模型服务端加密，本地没有密钥、无法解密；下面是记录里的密文原文。"),
+        h("pre.cipher.no-mark", { tabindex: "0" }, text === undefined ? "加载中…" : text),
+        h("div.more-line", null,
+          text ? lnk("复制密文", () => copyText(text, "已复制密文")) : null,
+          lnk("记录 #" + s.idx, (e) => recordMenu(e.currentTarget, s.idx)))));
+    }
+    return rwrap;
   }
   const open = !!S.stepOv.get(s.id);
   const btn = h("button.step-btn.think-row" + (open ? ".open" : ""), { type: "button", "aria-expanded": String(open) },
@@ -1891,7 +1914,11 @@ function recBlocks(rec) {
     c.forEach((p, b) => {
       if (!p || typeof p !== "object") return;
       if (p.type === "text") out.push({ kind: "text", b, f: "text", text: p.text || "", label: "text" });
-      else if (p.type === "thinking" || p.type === "redacted_thinking" || p.type === "reasoning") out.push({ kind: "thinking", b, f: "thinking", text: p.thinking || p.text || "", label: p.type });
+      else if (p.type === "thinking" || p.type === "redacted_thinking" || p.type === "reasoning") {
+        const text = p.thinking || p.text || "";
+        const cipher = text ? "" : p.signature || p.data || p.encrypted_content || "";
+        out.push({ kind: "thinking", b, f: "thinking", text, cipher: typeof cipher === "string" ? cipher : JSON.stringify(cipher), label: p.type });
+      }
       else if (p.type === "tool_use" || p.type === "server_tool_use") out.push({ kind: "tool_use", b, label: "tool_use · " + (p.name || "?"), text: typeof p.input === "string" ? p.input : JSON.stringify(p.input, null, 2) });
       else if (p.type === "tool_result") {
         const editable = typeof p.content === "string" || (Array.isArray(p.content) && p.content.every((x) => x && x.type === "text"));
@@ -1932,10 +1959,20 @@ function recordCard(rec, idx) {
           .map(([k, v]) => [h("span.k", null, k), h("span.v", null, v)]))));
       continue;
     }
-    const editable = b.kind === "text" || b.kind === "thinking" || (b.kind === "tool_result" && b.editable);
+    // 加密的思考块没有明文, 不提供编辑(改了也会和密文对不上)
+    const editable = b.kind === "text" || (b.kind === "thinking" && !!b.text) || (b.kind === "tool_result" && b.editable);
     const content = h("div");
     if (b.kind === "text") content.append(h("div.md", { html: renderMd(b.text) }));
-    else if (b.kind === "thinking") content.append(h("div.think-body", { style: { padding: "0" } }, b.text || "（思考内容不可见）"));
+    else if (b.kind === "thinking" && b.text) content.append(h("div.think-body", { style: { padding: "0" } }, b.text));
+    else if (b.kind === "thinking") {
+      content.append(h("div.faint", { style: { fontSize: "12px" } }, "（思考内容已加密，本地无法解密）"));
+      if (b.cipher) {
+        const pre = h("pre.cipher.no-mark", { hidden: true, tabindex: "0" }, b.cipher);
+        const label = "显示密文（" + fmtChars(b.cipher.length) + " 字符）";
+        const tg = lnk(label, () => { pre.hidden = !pre.hidden; tg.textContent = pre.hidden ? label : "收起密文"; });
+        content.append(h("div.more-line", null, tg, lnk("复制密文", () => copyText(b.cipher, "已复制密文"))), pre);
+      }
+    }
     else if (b.kind === "image") content.append(h("div.imgs", { style: { marginTop: "0" } }, imgThumb({ idx, b: b.b })));
     else content.append(longPre(b.text || ""));
     const lbl = h("div.blk-lbl", null, h("span", null, b.label),
