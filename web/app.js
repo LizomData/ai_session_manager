@@ -487,6 +487,11 @@ function dialog({ title, body, actions, wide, focus }) {
     for (const a of actions) {
       const b = h("button.btn" + (a.primary ? ".primary" : "") + (a.danger ? ".danger.solid" : ""), { type: "button" }, a.label);
       b.addEventListener("click", async () => {
+        if (a.run) {   // 不关闭对话框的按钮(如「预览」); 返回 true 时才关闭
+          b.disabled = true;
+          try { if (await a.run(b)) close(a.value); } catch (e) { toast(e.message || String(e), true); } finally { b.disabled = false; }
+          return;
+        }
         if (a.validate && !(await a.validate())) return;
         close(a.value);
       });
@@ -1771,13 +1776,145 @@ async function save() {
   toast("已保存" + (j.backup ? " · 备份 " + baseName(j.backup) : ""));
   loadSessions(true);
 }
+// 「存到本地」的清理 / 脱敏选项(和后端 sanitize.py 的选项一一对应)
+const SAN_PRESETS = {
+  share: { dialog_only: 1, drop_copies: 1, drop_cipher: 1, drop_images: 1, strip_account: 1, user_paths: 1, contacts: 1, secrets: 1, regen_ids: 1, shift_time: 1, hide_source: 1 },
+  slim: { dialog_only: 1, drop_copies: 1, drop_cipher: 1, drop_images: 1 },
+  redact: { strip_account: 1, user_paths: 1, contacts: 1, secrets: 1 },
+  raw: {},
+};
+const SAN_PRESET_LABELS = [["share", "干净分享"], ["slim", "仅瘦身"], ["redact", "仅脱敏"], ["raw", "原样保存"], ["custom", "自定义"]];
+const SAN_GROUPS = [
+  ["清理", [
+    ["dialog_only", "只保留对话记录", "去掉附件提醒、文件快照、花费统计、注入的系统提示和环境信息"],
+    ["drop_copies", "去掉工具结果的结构化副本", "Claude 的 toolUseResult / wireToolInputs，正文里已有一份"],
+    ["drop_cipher", "去掉加密思考的密文", "本地无法解密，只占体积"],
+    ["drop_images", "图片换成「[图片已移除]」", ""],
+  ]],
+  ["脱敏", [
+    ["strip_account", "删除账号与遥测字段", "邮箱、组织 / 账号 ID、花费、requestId、usage 等"],
+    ["user_paths", "删除用户名和托管账号", "C:\\Users\\Alice\\a.txt → C:\\Users\\a.txt；github.com/alice/repo → github.com/repo"],
+    ["project_dir", "删除项目目录", "路径变成相对路径：…\\项目\\src\\a.cs → src\\a.cs"],
+    ["contacts", "删除个人与设备标识", "邮箱、IP、MAC、主机名、设备序列号、Windows SID、卷序列号、Wi-Fi 名、本机 git 姓名、Apple Team ID；保留 127.0.0.1 和 noreply 这类服务地址"],
+    ["secrets", "删除密钥与令牌", "sk-、ghp_、AKIA、JWT、私钥、Bearer、password=、Cookie、URL 里的 token / sign、uid / openid、证书指纹等，只删值"],
+    ["regen_ids", "重新生成所有 ID", "会话 / 消息 / 工具调用 ID、正文和路径里的 UUID、计划文件名、临时文件名、后台任务和工作流 ID 都换成新的随机值，同一个 ID 处处一致"],
+    ["shift_time", "时间整体平移", "所有时间戳挪一个随机时长，先后顺序和间隔不变；工具输出正文里的日期不改"],
+    ["hide_source", "不记录原文件路径", ""],
+  ]],
+];
+const SAN_DROP_NAMES = {
+  "file-history-snapshot": "文件快照", "file-history-delta": "文件快照", "queue-operation": "队列", "last-prompt": "最近提问",
+  mode: "模式", "atis-latch": "状态标记", "cost-state": "花费统计", "artifact-autoreact-ledger": "artifact 账号记录",
+  "artifact-comment-monitor": "artifact 记录", "frame-link": "artifact 链接", "role:system": "系统提示", "role:developer": "开发者指令",
+  user: "注入内容", "role:user": "注入内容", assistant: "子代理消息",
+};
+const sanPresetOf = (opts) => {
+  const on = Object.keys(opts).filter((k) => opts[k]).sort().join(",");
+  const hit = Object.keys(SAN_PRESETS).find((p) => Object.keys(SAN_PRESETS[p]).sort().join(",") === on);
+  return hit || "custom";
+};
+function sanReportEl(rep) {
+  if (!rep) return h("span.form-hint", null, "原样保存：不做清理和脱敏。");
+  const items = [
+    ["记录", fmtNum(rep.records[0]) + " → " + fmtNum(rep.records[1]) + " 条"],
+    ["体积", fmtSize(rep.size[0]) + " → " + fmtSize(rep.size[1])],
+  ];
+  const dropped = Object.entries(rep.dropped || {});
+  if (dropped.length) {
+    const merged = new Map();
+    for (const [k, n] of dropped) {
+      const name = SAN_DROP_NAMES[k] || (k.startsWith("附件:") ? "附件提醒" : k.startsWith("system:") ? "系统事件" : k.startsWith("role:") ? "注入内容" : k);
+      merged.set(name, (merged.get(name) || 0) + n);
+    }
+    items.push(["删除的记录", [...merged].map(([k, n]) => k + " " + fmtNum(n)).join("、")]);
+  }
+  const rmv = rep.removed || {};
+  const parts = [];
+  if (rmv.copies) parts.push("结构化副本 " + fmtNum(rmv.copies) + " 处");
+  if (rmv.cipher && rmv.cipher[0]) parts.push("密文 " + fmtNum(rmv.cipher[0]) + " 段（" + fmtSize(rmv.cipher[1]) + "）");
+  if (rmv.images && rmv.images[0]) parts.push("图片 " + fmtNum(rmv.images[0]) + " 张（" + fmtSize(rmv.images[1]) + "）");
+  if (rmv.fields) parts.push("账号 / 遥测字段 " + fmtNum(rmv.fields) + " 个");
+  if (rmv.truncated) parts.push("截断工具输出 " + fmtNum(rmv.truncated) + " 段");
+  if (parts.length) items.push(["去掉的内容", parts.join("、")]);
+  const del = Object.entries(rep.deleted || rep.replaced || {});
+  items.push(["删除的敏感内容", del.length ? del.map(([k, n]) => k + " " + fmtNum(n) + " 处").join("、") : "无"]);
+  if (rep.ids) items.push(["重新生成的 ID", fmtNum(rep.ids[0]) + " 个（" + fmtNum(rep.ids[1]) + " 处）"]);
+  if (rep.timeShift != null) items.push(["时间平移", rep.timeShift ? fmtNum(rep.timeShift) + " 处" : "没有时间戳"]);
+  if (rep.users && rep.users.length) items.push(["识别到的用户名", rep.users.join("、") + "（已从路径中删除）"]);
+  const ident = Object.entries(rep.identity || {});
+  if (ident.length) items.push(["识别到的本机身份", ident.map(([k, v]) => k + " " + v.join("、")).join("；") + "（已删除）"]);
+  if (rep.skipped && rep.skipped.includes("user_paths")) items.push(["用户名", "这份会话之前已经删过用户名，这次跳过（避免把下一层目录误当成用户名删掉）"]);
+  items.push(["工作目录记为", rep.cwd || "（不记录）"]);
+  return h("div.kv.san-kv", null, items.map(([k, v]) => [h("span.k", null, k), h("span.v", null, v)]));
+}
 async function saveLocal() {
-  const dft = S.path.toLowerCase().endsWith("store.db") ? baseName(S.path.replace(/[\\/]store\.db$/i, "")) : baseName(S.path).replace(/\.jsonl$/i, "");
-  const name = await promptDlg("存到本地", "文件名", dft, "保存", "保存到工具目录的 saved_sessions/，首行记下来源（源文件、工作目录、时间），之后可以再编辑或导出。");
-  if (name === null) return;
-  const j = await api("/api/save-local", { name });
+  const base = S.path.toLowerCase().endsWith("store.db") ? baseName(S.path.replace(/[\\/]store\.db$/i, "")) : baseName(S.path).replace(/\.jsonl$/i, "");
+  const now = new Date();
+  const cleanName = "clean_" + now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate()) + "_" + pad(now.getHours()) + pad(now.getMinutes());
+  let saved = null;
+  try { saved = JSON.parse(lsGet("sanitize", "null")); } catch (e) { saved = null; }
+  const st = { preset: (saved && saved.preset) || "share", opts: {} };
+  st.opts = Object.assign({}, st.preset === "custom" && saved ? saved.opts : SAN_PRESETS[st.preset] || SAN_PRESETS.share);
+  const nameInp = h("input.inp", { value: st.preset === "raw" ? base : cleanName, spellcheck: "false", autocomplete: "off" });
+  let nameTouched = false;
+  nameInp.addEventListener("input", () => { nameTouched = true; });
+  const maxInp = h("input.inp", { type: "number", min: "0", value: String((saved && saved.max) || 0), style: { width: "110px" } });
+  const report = h("div.san-report");
+  const hint = (t) => report.replaceChildren(h("span.form-hint", null, t));
+  hint("点「预览」查看会删掉和替换多少内容；大会话需要几秒到几十秒。原会话文件不会改动。");
+  const presetBox = h("div.ct");
+  const checks = {};
+  const sync = () => {
+    for (const k in checks) checks[k].checked = !!st.opts[k];
+    presetBox.replaceChildren(...SAN_PRESET_LABELS.map(([v, t]) => {
+      const r = h("input", { type: "radio", name: "spreset", value: v, checked: st.preset === v });
+      r.addEventListener("change", () => {
+        st.preset = v;
+        if (v !== "custom") st.opts = Object.assign({}, SAN_PRESETS[v]);
+        if (!nameTouched) nameInp.value = v === "raw" ? base : cleanName;
+        sync();
+        hint("选项变了，点「预览」重新计算。");
+      });
+      return h("label.radio-card", null, r, t);
+    }));
+  };
+  const groups = SAN_GROUPS.map(([title, items]) => h("div.san-group", null, h("div.san-title", null, title),
+    items.map(([k, label, sub]) => {
+      const cb = h("input", { type: "checkbox" });
+      checks[k] = cb;
+      cb.addEventListener("change", () => {
+        st.opts[k] = cb.checked ? 1 : 0;
+        st.preset = sanPresetOf(st.opts);
+        sync();
+        hint("选项变了，点「预览」重新计算。");
+      });
+      return h("label.san-item", null, cb, h("span", null, label, sub ? h("small", null, sub) : null));
+    })));
+  maxInp.addEventListener("input", () => hint("选项变了，点「预览」重新计算。"));
+  const row = (lb, ct) => h("div.form-row", null, h("span.lb", null, lb), h("div.ct", null, ct));
+  const body = h("div", null, row("文件名", nameInp), row("方式", presetBox), h("div.san-groups", null, groups),
+    row("工具输出", [maxInp, h("span.form-hint", null, "每段最多保留的字符数，0 = 不截断")]), report);
+  sync();
+  const collect = () => Object.assign({}, st.opts, { max_tool_chars: parseInt(maxInp.value, 10) || 0 });
+  const preview = async () => {
+    const opts = collect();
+    if (!Object.values(opts).some(Boolean)) { report.replaceChildren(sanReportEl(null)); return false; }
+    hint("正在计算…");
+    const j = await api("/api/save-local", { dry: true, sanitize: opts });
+    report.replaceChildren(sanReportEl(j.report));
+    return false;
+  };
+  const ok = await dialog({
+    title: "存到本地", body, wide: true, focus: nameInp,
+    actions: [{ label: "取消", value: false }, { label: "预览", run: preview }, { label: "保存", value: true, primary: true }],
+  });
+  if (!ok) return;
+  const opts = collect();
+  lsSet("sanitize", JSON.stringify({ preset: st.preset, opts: st.opts, max: opts.max_tool_chars }));
+  toast("正在保存…");
+  const j = await api("/api/save-local", { name: nameInp.value.trim() || cleanName, sanitize: opts });
   await loadSessions(true);
-  toast("已存到本地：" + baseName(j.path) + "（" + fmtNum(j.count) + " 条）");
+  toast("已存到本地：" + baseName(j.path) + "（" + fmtNum(j.count) + " 条，" + fmtSize(j.size) + "）");
 }
 async function exportFile(fmt) {
   const text = await apiText("/api/export?fmt=" + fmt);

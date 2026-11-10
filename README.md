@@ -68,11 +68,49 @@ python session_editor.py --port 8790 --no-browser --dir <额外扫描目录>
 | 撤销 / 重做 | 所有修改都可逐步回退(`Ctrl+Z` / `Ctrl+Y`) |
 | 保存 | 写回原文件,写前自动生成 `.bak.<时间戳>`;「备份与回滚」可回到任一备份 |
 | Fork 会话 | 从任意记录分叉出新 `sessionId` 的独立会话文件;Fork 前会**扫描分叉点之后的文件改动**并提示(Fork 只分叉对话,不还原工作区文件) |
-| 存到本地 | 把当前会话(含改动)另存为 jsonl 到 `saved_sessions/`;首行写入**来源信息**(origin / 源文件 / cwd / 时间),重开后可再编辑或导出 |
+| 存到本地 | 把当前会话(含改动)另存为 jsonl 到 `saved_sessions/`,可选清理和脱敏(见下);首行写入**来源信息**,重开后可再编辑或导出 |
 | 导出到… | 弹窗选目标,把当前会话导出到其它 CLI(见下);导出前自动剔除斜杠命令 / 本地命令 caveat 等噪声 |
 | 导出 MD / TXT | Markdown 按轮整理(提问、执行过程摘要、最终回复);TXT 为逐条记录的完整文本 |
 
 界面支持浅色 / 深色(跟随系统,也可在侧栏顶部切换),窄屏时侧栏改为抽屉。
+
+### 存到本地:清理与脱敏
+
+会话文件里除了对话,还有大量附带信息:工具读图的 base64、工具结果的结构化副本、加密思考的密文,以及你的邮箱、组织 / 账号 ID、花费统计、系统提示词、CLAUDE.md 全文、本机路径等。「存到本地」可以在保存时把这些去掉:
+
+| 预设 | 做什么 |
+| ---- | ---- |
+| 干净分享 | 只留对话记录,去掉结构化副本 / 密文 / 图片,删账号与遥测字段,删掉用户名和托管账号、个人与设备标识、密钥与令牌,重新生成 ID,时间整体平移,不记录原文件路径 |
+| 仅瘦身 | 只做清理,不改正文 |
+| 仅脱敏 | 只删敏感内容和账号字段,记录结构不变 |
+| 原样保存 | 和以前一样 |
+
+也可以逐项勾选,另有「删除项目目录」和「工具输出截断」两个可选项。点「预览」先看报告(删了多少条、删了多少处敏感内容、体积变化),原会话文件不会改动。
+
+敏感内容直接删除,不留占位符:
+
+| 类别 | 删法 |
+| ---- | ---- |
+| 用户名 | 路径里的用户名连同分隔符删掉:`C:\Users\Alice\a.txt` → `C:\Users\a.txt` |
+| 托管账号 | 本机仓库远程地址、`git push` 输出、`gh` 登录信息里认出的账号:`github.com/alice/repo` → `github.com/repo`,`alice/repo` → `repo` |
+| 项目目录 | 删掉目录前缀,路径变成相对路径:`E:\work\proj\src\a.cs` → `src\a.cs` |
+| 邮箱 | 删掉地址,带尖括号的连括号一起删 |
+| IP | IPv4 连同端口一起删,`127.0.0.1`、首段小于 10 的(多半是版本号)保留;IPv6 也删,`::1` 保留 |
+| MAC | 删掉,全零和广播地址保留 |
+| 主机名 | 本机主机名,以及 `DESKTOP-xxxxxxx` / `LAPTOP-xxxxxxxx` / `WIN-xxxxxxxxxxx` 这类 Windows 默认主机名 |
+| 本机 git 姓名 | 自动读 `git config user.name`,在哪出现都删(常见于 `git log` 的 Author 行) |
+| 设备序列号 | 删掉 `adb -s 序列号` 整个参数和 `ANDROID_SERIAL=` 的值,同一序列号在别处(如 `adb devices` 输出)出现也删 |
+| 其它设备标识 | Windows 账户 SID(`S-1-5-21-…`)、磁盘卷序列号、Wi-Fi 名(SSID)、Apple 开发者签名身份和 Team ID |
+| 密钥 | 只删值,保留键名:`api_key: xxx` 删除后只剩 `api_key:` |
+| Cookie / 令牌参数 | Cookie 请求头和 `curl --cookie` 的值、URL 里 `token` / `sign` / `signature` 等参数的值、`sessionid` 这类会话令牌 |
+| 账号参数 | `uid` / `openid` / `userId` / `roleId` 等后面带数字的值 |
+| 证书指纹 | 冒号分隔的 SHA1 / SHA256 指纹整段删掉 |
+
+「重新生成所有 ID」不删 ID,而是换成新的随机值:会话 ID、消息 uuid / parentUuid、工具调用 ID(`toolu_`、`call_`、Cursor 的复合 ID)、子代理 agentId,以及正文和路径里出现的 UUID、`msg_` / `req_` 这类服务端 ID;本机生成的随机名也一样换掉,包括计划文件名(会话 slug)、`tool-results` 临时文件名、后台任务 ID、工作流 `wf_` ID、artifact 链接 ID。同一个原值处处换成同一个新值,所以记录链、工具调用和结果的配对、正文里提到的会话文件名都还对得上;新值和原值没有关系。删掉的话记录链和配对会断。代码里写死的 GUID 常量也会被换掉。没有用处的 ID(`requestId`、`message.id`、Cursor 消息的 `_id` 等)随「删除账号与遥测字段」直接删除。
+
+「时间整体平移」把所有时间戳往前挪同一个随机时长(30~400 天,再加一天内的随机秒数),先后顺序和间隔不变,阅读视图照常显示每轮时间和耗时,但看不出真实日期和几点。Cursor 提问里的 `<timestamp>` 一起挪,并改成 UTC,不暴露时区。工具输出正文里的日期(`ls`、`git log` 等)没法可靠识别,不改。
+
+`noreply@anthropic.com`、`git@github.com` 这类服务地址保留。删除是按规则匹配的,你在提问里写的人名、代码里的账号等做不到百分之百,保存前请看一下预览报告。
 
 ## 导出到其它 CLI
 
@@ -113,6 +151,7 @@ python session_editor.py --port 8790 --no-browser --dir <额外扫描目录>
 
 - `session_editor.py` — HTTP 服务:会话发现、打开、编辑 / 撤销、保存、搜索、导出等接口
 - `reader_model.py` — 阅读视图模型:记录分类、按轮组织、对话目录索引、步骤标题与详情、可读 Markdown 导出、会话列表的标题 / 摘要
+- `sanitize.py` — 「存到本地」的清理与脱敏
 - `web/` — 前端页面(`index.html` / `app.css` / `app.js`,无构建步骤)
 - `cursor_store.py` — 读 Cursor store.db(内容寻址 blob + protobuf 解码)
 - `codex_store.py` — 读/写 Codex rollout + 登记 threads 索引

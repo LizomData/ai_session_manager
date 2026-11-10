@@ -604,6 +604,14 @@ pre.cipher { margin: 4px 0 0; max-height: 220px; overflow: auto; padding: 8px 12
   border: 1px solid var(--border); cursor: pointer; }
 .radio-card:has(input:checked) { border-color: var(--ring); background: var(--action-soft); }
 .form-hint { font-size: 12px; color: var(--text-3); line-height: 18px; }
+.san-groups { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 24px; margin: 4px 0 6px; }
+.san-title { margin-bottom: 2px; font-size: 12px; font-weight: 600; color: var(--text-2); }
+.san-item { display: flex; align-items: flex-start; gap: 8px; padding: 4px 0; color: var(--text-1); cursor: pointer; }
+.san-item input { margin-top: 3px; flex: none; }
+.san-item small { display: block; font-size: 12px; line-height: 17px; color: var(--text-3); }
+.san-report { margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: var(--bg-subtle); min-height: 40px; }
+.san-kv { grid-template-columns: 110px 1fr; gap: 4px 12px; }
+@media (max-width: 640px) { .san-groups { grid-template-columns: 1fr; } }
 .flist { margin: 6px 0 10px; padding: 8px 12px; border-radius: 8px; background: var(--bg-subtle); font: 12px/19px var(--mono);
   color: var(--text-2); max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
 .warnbox { margin: 8px 0; padding: 10px 12px; border-radius: 8px; background: var(--warning-soft); color: var(--warning-text);

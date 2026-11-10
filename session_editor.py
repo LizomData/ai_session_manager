@@ -35,6 +35,7 @@ import cursor_store
 import codex_store
 import claude_store
 import reader_model as rm
+import sanitize
 
 # ---------------- 后端会话状态(单文件, 本地单用户) ----------------
 STATE = {"path": None, "records": [], "dirty": False, "errors": [], "origin": "jsonl", "cwd": "",
@@ -184,8 +185,9 @@ def detect_style(path, origin, records):
 
 
 def invalidate():
-    """记录变了: 丢掉轮次索引, 版本号 +1(前端据此判断目录是否过期)。"""
+    """记录变了: 丢掉轮次索引和去隐私化缓存, 版本号 +1(前端据此判断目录是否过期)。"""
     STATE["index"] = None
+    STATE["sanitize_cache"] = None
     STATE["rev"] += 1
 
 
@@ -939,40 +941,69 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/save-local":
                 if not STATE["records"]:
                     return self._send(400, {"ok": False, "error": "未打开会话"})
-                src = STATE["path"] or "session"
-                base = os.path.basename(src)
-                if base.lower() == "store.db":
-                    base = os.path.basename(os.path.dirname(src)) + ".jsonl"
-                name = data.get("name") or base
-                name = re.sub(r"[^\w.\-]", "_", name)
-                if not name.endswith(".jsonl"):
-                    name += ".jsonl"
+                opts = sanitize.normalize(data.get("sanitize") or {})
+                cleaning = sanitize.active(opts)
+                # 若之前保存过则沿用最初的来源, 否则按当前判定
+                prior = next((r for r in STATE["records"]
+                              if isinstance(r, dict) and r.get("type") == "cc_meta"), None)
+                if prior and prior.get("origin"):
+                    origin = prior["origin"]
+                elif STATE.get("origin") == "cursor-store":
+                    origin = "cursor-store"
+                else:
+                    origin = _source_of(STATE["path"]) if STATE.get("path") else "jsonl"
+                source_path = (prior or {}).get("source_path") or STATE.get("path")
+                cwd = STATE.get("cwd") or _infer_cwd(STATE["records"])
+                report = None
                 try:
+                    if cleaning:
+                        # 预览和保存用同一份结果(会话没改、选项没变时直接复用)
+                        key = (STATE["rev"], json.dumps(opts, sort_keys=True))
+                        cache = STATE.get("sanitize_cache")
+                        if cache and cache[0] == key:
+                            recs, report = cache[1], cache[2]
+                        else:
+                            recs, report = sanitize.run(STATE["records"], opts, cwd=cwd)
+                            STATE["sanitize_cache"] = (key, recs, report)
+                    else:
+                        recs = [r for r in STATE["records"]
+                                if not (isinstance(r, dict) and r.get("type") == "cc_meta")]
+                    if data.get("dry"):
+                        return self._send(200, {"ok": True, "report": report, "count": len(recs)})
+
+                    src = STATE["path"] or "session"
+                    base = os.path.basename(src)
+                    if base.lower() == "store.db":
+                        base = os.path.basename(os.path.dirname(src)) + ".jsonl"
+                    name = re.sub(r"[^\w.\-]", "_", data.get("name") or base)
+                    if not name.endswith(".jsonl"):
+                        name += ".jsonl"
                     os.makedirs(SAVED_DIR, exist_ok=True)
                     out_path = os.path.join(SAVED_DIR, name)
                     if os.path.exists(out_path):
                         root, ext = os.path.splitext(name)
                         out_path = os.path.join(SAVED_DIR, "%s.%d%s" % (root, int(time.time()), ext))
-                    # 剥掉旧的来源元数据; 若之前保存过则沿用最初的来源, 否则按当前判定
-                    prior = next((r for r in STATE["records"]
-                                  if isinstance(r, dict) and r.get("type") == "cc_meta"), None)
-                    recs = [r for r in STATE["records"]
-                            if not (isinstance(r, dict) and r.get("type") == "cc_meta")]
-                    if prior and prior.get("origin"):
-                        origin = prior["origin"]
-                    elif STATE.get("origin") == "cursor-store":
-                        origin = "cursor-store"
-                    else:
-                        origin = _source_of(STATE["path"]) if STATE.get("path") else "jsonl"
                     meta_line = {"type": "cc_meta", "origin": origin,
-                                 "source_path": (prior or {}).get("source_path") or STATE.get("path"),
-                                 "cwd": STATE.get("cwd") or _infer_cwd(recs),
                                  "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
+                    # 沿用之前做过的处理标记: 再次脱敏时据此跳过已删过的用户名, 也不重新记录原路径
+                    prior_san = (prior or {}).get("sanitized") if isinstance((prior or {}).get("sanitized"), dict) else {}
+                    if cleaning:
+                        meta_line["sanitized"] = dict(prior_san, **{k: v for k, v in opts.items() if v})
+                        meta_line["cwd"] = report["cwd"]
+                        if not meta_line["sanitized"].get("hide_source"):
+                            meta_line["source_path"] = sanitize.redact_text(source_path or "", opts, cwd)
+                    else:
+                        if prior_san:
+                            meta_line["sanitized"] = prior_san
+                        if not prior_san.get("hide_source"):
+                            meta_line["source_path"] = source_path
+                        meta_line["cwd"] = cwd
                     save_jsonl(out_path, [meta_line] + recs)
+                    STATE["sanitize_cache"] = None
                 except Exception as e:
                     return self._send(500, {"ok": False, "error": str(e)})
-                return self._send(200, {"ok": True, "path": os.path.abspath(out_path),
-                                        "count": len(recs)})
+                return self._send(200, {"ok": True, "path": os.path.abspath(out_path), "count": len(recs),
+                                        "size": os.path.getsize(out_path), "report": report})
 
             if u.path == "/api/save":
                 path = STATE["path"]
